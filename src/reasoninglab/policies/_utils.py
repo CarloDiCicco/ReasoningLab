@@ -27,3 +27,50 @@ def _extract_candidate_code(raw_text: str) -> str:
             return match.group("code").strip()
 
     return matches[0].group("code").strip()
+
+
+# ── Repair prompt builder ─────────────────────────────────────────────────────
+
+# Maximum stderr characters included in repair prompts.
+# Long tracebacks (recursive errors, large test suites) can blow up the model's
+# context window. We keep the tail (not the head) because Python tracebacks put
+# the actual error message at the end.
+_MAX_STDERR_CHARS = 3000
+
+
+def _build_repair_prompt(
+    original_prompt: str,
+    candidate_code: str,
+    stderr: str,
+    failure_type: str,
+) -> str:
+    """Build a repair prompt that includes verifier feedback from the previous attempt.
+
+    The template is deliberately minimal — no chain-of-thought instructions or
+    role preambles. This is a controlled H1 experiment: we measure the value of
+    verifier feedback alone, not the value of prompt engineering.
+
+    Args:
+        original_prompt: The task description (same text the first attempt saw).
+        candidate_code:  The code from the failed attempt.
+        stderr:          Raw traceback / error output from the verifier.
+        failure_type:    Normalized label as a plain string ("syntax", "assertion", etc.).
+                         Passed as str (not FailureType enum) to keep this module
+                         free of taxonomy imports.
+    """
+    # Truncate stderr from the front, keeping the tail where the actual error
+    # message lives. Python tracebacks read bottom-up: the exception line is last.
+    # A plain-English preamble tells the model it has a partial view so it can
+    # reason accordingly rather than assuming the error is complete.
+    if len(stderr) > _MAX_STDERR_CHARS:
+        stderr = f"showing the last {_MAX_STDERR_CHARS} chars of the stderr:\n" + stderr[-_MAX_STDERR_CHARS:]
+
+    return (
+        f"{original_prompt}\n\n"
+        f"Your previous attempt produced a {failure_type} error.\n\n"
+        f"Previous code:\n"
+        f"```python\n{candidate_code}\n```\n\n"
+        f"Error output:\n"
+        f"```\n{stderr}\n```\n\n"
+        f"Fix the code and return a corrected version."
+    )

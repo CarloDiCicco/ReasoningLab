@@ -1,86 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 # Import the module object so we can monkeypatch names inside it at test time.
 import reasoninglab.policies.best_of_b as best_of_b_module
 from reasoninglab.policies.best_of_b import run_best_of_b
-from reasoninglab.tasks.schema import TaskRecord
 from reasoninglab.verify.executor import ExecutionResult
 from reasoninglab.verify.taxonomy import FailureType
 
-
-# ── Fakes ─────────────────────────────────────────────────────────────────────
-# These stand-ins replace real I/O boundaries (model inference, subprocess
-# execution) so tests run instantly and deterministically.
-
-@dataclass
-class _FakeGeneration:
-    # Mirrors the fields of GenerationLike that run_best_of_b reads.
-    text: str
-    prompt_tokens: int
-    completion_tokens: int
-    elapsed_s: float
-
-
-class _FakeModel:
-    """Model stub that returns generations from a pre-set sequence.
-
-    Yields one generation per call in order. IndexError on over-call is
-    intentional: it loudly fails the test if the policy makes more calls
-    than expected, acting as a built-in budget guard.
-    """
-
-    def __init__(self, generations: list[_FakeGeneration]) -> None:
-        self._generations = list(generations)
-        self._index = 0
-        # Each entry is (prompt, return_hidden_states) — inspected by tests.
-        self.calls: list[tuple[str, bool]] = []
-
-    def generate(self, prompt: str, return_hidden_states: bool = False) -> _FakeGeneration:
-        self.calls.append((prompt, return_hidden_states))
-        gen = self._generations[self._index]
-        self._index += 1
-        return gen
+from conftest import FakeGeneration, FakeModel, make_execution_result, make_gen, make_task
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _task(prompt: str = "Solve this.\nReturn valid Python.") -> TaskRecord:
-    return TaskRecord(
-        task_id="task-1",
-        prompt=prompt,
-        test_code="assert True",
-        timeout_s=8.0,
-    )
-
-
-def _execution_result(passed: bool, elapsed_s: float = 0.5) -> ExecutionResult:
-    return ExecutionResult(
-        passed=passed,
-        timed_out=False,
-        stdout="",
-        stderr="",
-        elapsed_s=elapsed_s,
-        exit_code=0 if passed else 1,
-    )
-
-
-def _gen(text: str = "print('x')", prompt_tokens: int = 4, completion_tokens: int = 3, elapsed_s: float = 0.2) -> _FakeGeneration:
-    """Shorthand for a _FakeGeneration with sensible defaults."""
-    return _FakeGeneration(text, prompt_tokens, completion_tokens, elapsed_s)
-
-
 def _run_with_stubs(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    generations: list[_FakeGeneration],
+    generations: list[FakeGeneration],
     executions: list[ExecutionResult],
     classifications: list[FailureType],
     verifier_timeout_s: float | None = None,
-    task: TaskRecord | None = None,
+    task=None,
     budget_B: int = 5,
     return_hidden_states: bool = False,
 ):
@@ -120,9 +60,9 @@ def _run_with_stubs(
     monkeypatch.setattr(best_of_b_module, "execute_candidate", _fake_execute)
     monkeypatch.setattr(best_of_b_module, "classify_result", _fake_classify)
 
-    model = _FakeModel(generations)
+    model = FakeModel(generations)
     result = run_best_of_b(
-        task=task or _task(),
+        task=task or make_task(),
         model=model,
         budget_B=budget_B,
         verifier_timeout_s=verifier_timeout_s,
@@ -138,8 +78,8 @@ def test_best_of_b_exhausts_budget_when_all_fail(monkeypatch: pytest.MonkeyPatch
     budget = 3
     model, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.ASSERTION] * budget,
         budget_B=budget,
     )
@@ -153,8 +93,8 @@ def test_best_of_b_early_exits_on_first_pass(monkeypatch: pytest.MonkeyPatch):
     # kept looping past the passing attempt — acts as a correctness guard.
     model, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen(), _gen(text="print('pass')")],
-        executions=[_execution_result(passed=False), _execution_result(passed=True)],
+        generations=[make_gen(), make_gen(text="print('pass')")],
+        executions=[make_execution_result(passed=False), make_execution_result(passed=True)],
         classifications=[FailureType.ASSERTION, FailureType.PASS],
         budget_B=5,
     )
@@ -166,8 +106,8 @@ def test_best_of_b_single_attempt_pass_on_first_try(monkeypatch: pytest.MonkeyPa
     # Budget=5, but passes immediately: only 1 call, 1 record, candidate set.
     model, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen(text="def solve(): return 1")],
-        executions=[_execution_result(passed=True)],
+        generations=[make_gen(text="def solve(): return 1")],
+        executions=[make_execution_result(passed=True)],
         classifications=[FailureType.PASS],
         budget_B=5,
     )
@@ -178,9 +118,9 @@ def test_best_of_b_single_attempt_pass_on_first_try(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.parametrize("budget", [0, -1])
 def test_best_of_b_rejects_invalid_budget(budget: int):
-    model = _FakeModel([_gen()])
+    model = FakeModel([make_gen()])
     with pytest.raises(ValueError):
-        run_best_of_b(task=_task(), model=model, budget_B=budget)
+        run_best_of_b(task=make_task(), model=model, budget_B=budget)
 
 
 def test_best_of_b_attempt_idx_is_sequential(monkeypatch: pytest.MonkeyPatch):
@@ -188,8 +128,8 @@ def test_best_of_b_attempt_idx_is_sequential(monkeypatch: pytest.MonkeyPatch):
     budget = 4
     _, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.RUNTIME] * budget,
         budget_B=budget,
     )
@@ -201,8 +141,8 @@ def test_best_of_b_policy_field_on_all_records(monkeypatch: pytest.MonkeyPatch):
     budget = 3
     _, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.ASSERTION] * budget,
         budget_B=budget,
     )
@@ -214,8 +154,8 @@ def test_best_of_b_selected_candidate_on_pass(monkeypatch: pytest.MonkeyPatch):
     # to the executor on the passing attempt (captured_calls[1]).
     _, result, captured = _run_with_stubs(
         monkeypatch,
-        generations=[_gen(), _gen(text="def solve(): return 42")],
-        executions=[_execution_result(passed=False), _execution_result(passed=True)],
+        generations=[make_gen(), make_gen(text="def solve(): return 42")],
+        executions=[make_execution_result(passed=False), make_execution_result(passed=True)],
         classifications=[FailureType.ASSERTION, FailureType.PASS],
         budget_B=5,
     )
@@ -226,8 +166,8 @@ def test_best_of_b_selected_candidate_none_on_all_fail(monkeypatch: pytest.Monke
     budget = 3
     _, result, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.RUNTIME] * budget,
         budget_B=budget,
     )
@@ -238,12 +178,12 @@ def test_best_of_b_tokens_and_elapsed_per_attempt(monkeypatch: pytest.MonkeyPatc
     # Each AttemptRecord must reflect its own generation + execution costs,
     # not a running total or a shared value.
     gens = [
-        _gen(prompt_tokens=10, completion_tokens=20, elapsed_s=0.1),
-        _gen(prompt_tokens=12, completion_tokens=34, elapsed_s=0.25),
+        make_gen(prompt_tokens=10, completion_tokens=20, elapsed_s=0.1),
+        make_gen(prompt_tokens=12, completion_tokens=34, elapsed_s=0.25),
     ]
     execs = [
-        _execution_result(passed=False, elapsed_s=0.4),
-        _execution_result(passed=False, elapsed_s=0.75),
+        make_execution_result(passed=False, elapsed_s=0.4),
+        make_execution_result(passed=False, elapsed_s=0.75),
     ]
     _, result, _ = _run_with_stubs(
         monkeypatch,
@@ -263,8 +203,8 @@ def test_best_of_b_uses_verifier_timeout_override(monkeypatch: pytest.MonkeyPatc
     budget = 2
     _, _, captured = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.SYNTAX] * budget,
         verifier_timeout_s=1.75,
         budget_B=budget,
@@ -275,11 +215,11 @@ def test_best_of_b_uses_verifier_timeout_override(monkeypatch: pytest.MonkeyPatc
 def test_best_of_b_falls_back_to_task_timeout(monkeypatch: pytest.MonkeyPatch):
     # When no override is given, every execute call must use task.timeout_s.
     budget = 2
-    task = _task()
+    task = make_task()
     _, _, captured = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.SYNTAX] * budget,
         task=task,
         budget_B=budget,
@@ -295,8 +235,8 @@ def test_best_of_b_forwards_return_hidden_states(
     budget = 2
     model, _, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.RUNTIME] * budget,
         budget_B=budget,
         return_hidden_states=return_hidden_states,
@@ -308,12 +248,12 @@ def test_best_of_b_passes_prompt_unchanged_on_every_call(monkeypatch: pytest.Mon
     # The policy must pass the prompt verbatim on every attempt — no trimming
     # or reformatting, even across multiple iterations.
     prompt = "  Keep spacing.\nAnd new lines.\n"
-    task = _task(prompt=prompt)
+    task = make_task(prompt=prompt)
     budget = 3
     model, _, _ = _run_with_stubs(
         monkeypatch,
-        generations=[_gen() for _ in range(budget)],
-        executions=[_execution_result(passed=False)] * budget,
+        generations=[make_gen() for _ in range(budget)],
+        executions=[make_execution_result(passed=False)] * budget,
         classifications=[FailureType.RUNTIME] * budget,
         task=task,
         budget_B=budget,

@@ -1,73 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 # Import the module object so we can monkeypatch names inside it at test time.
 import reasoninglab.policies.baseline as baseline_module
 from reasoninglab.policies._utils import _extract_candidate_code
 from reasoninglab.policies.baseline import run_baseline
-from reasoninglab.tasks.schema import TaskRecord
 from reasoninglab.verify.executor import ExecutionResult
 from reasoninglab.verify.taxonomy import FailureType
 
-
-# ── Fakes ─────────────────────────────────────────────────────────────────────
-# These stand-ins replace real I/O boundaries (model inference, subprocess
-# execution) so tests run instantly and deterministically.
-
-@dataclass
-class _FakeGeneration:
-    # Mirrors the fields of GenerationLike that run_baseline reads.
-    text: str
-    prompt_tokens: int
-    completion_tokens: int
-    elapsed_s: float
-
-
-class _FakeModel:
-    # Always returns the same canned generation; records every call so tests
-    # can assert on what prompt and flags were passed to generate().
-    def __init__(self, generation: _FakeGeneration) -> None:
-        self._generation = generation
-        self.calls: list[tuple[str, bool]] = []
-
-    def generate(self, prompt: str, return_hidden_states: bool = False) -> _FakeGeneration:
-        self.calls.append((prompt, return_hidden_states))
-        return self._generation
+from conftest import FakeGeneration, FakeModel, make_execution_result, make_gen, make_task
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _task(prompt: str = "Solve this.\nReturn valid Python.") -> TaskRecord:
-    return TaskRecord(
-        task_id="task-1",
-        prompt=prompt,
-        test_code="assert True",
-        timeout_s=8.0,
-    )
-
-
-def _execution_result(passed: bool, elapsed_s: float = 0.5) -> ExecutionResult:
-    return ExecutionResult(
-        passed=passed,
-        timed_out=False,
-        stdout="",
-        stderr="",
-        elapsed_s=elapsed_s,
-        exit_code=0 if passed else 1,
-    )
-
-
 def _run_with_stubs(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    generation: _FakeGeneration,
+    generation: FakeGeneration,
     execution: ExecutionResult,
     classified_as: FailureType,
     verifier_timeout_s: float | None = None,
-    task: TaskRecord | None = None,
+    task=None,
     budget_B: int = 1,
 ):
     # captured holds the exact arguments that run_baseline passed to execute_candidate,
@@ -85,9 +39,10 @@ def _run_with_stubs(
     monkeypatch.setattr(baseline_module, "execute_candidate", _fake_execute)
     monkeypatch.setattr(baseline_module, "classify_result", lambda _: classified_as)
 
-    model = _FakeModel(generation)
+    # Baseline only makes one call, so wrap the single generation in a list.
+    model = FakeModel([generation])
     result = run_baseline(
-        task=task or _task(),
+        task=task or make_task(),
         model=model,
         budget_B=budget_B,
         verifier_timeout_s=verifier_timeout_s,
@@ -102,8 +57,8 @@ def test_baseline_calls_generate_once_even_when_budget_is_larger(monkeypatch: py
     # guard check. A larger budget must not cause extra generate() calls.
     model, _, _ = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 4, 3, 0.2),
-        execution=_execution_result(passed=False),
+        generation=FakeGeneration("print('x')", 4, 3, 0.2),
+        execution=make_execution_result(passed=False),
         classified_as=FailureType.ASSERTION,
         budget_B=5,
     )
@@ -113,11 +68,11 @@ def test_baseline_calls_generate_once_even_when_budget_is_larger(monkeypatch: py
 def test_baseline_uses_task_prompt_unchanged(monkeypatch: pytest.MonkeyPatch):
     # The policy must pass the prompt verbatim — no trimming or reformatting.
     prompt = "  Keep spacing.\nAnd new lines.\n"
-    task = _task(prompt=prompt)
+    task = make_task(prompt=prompt)
     model, _, _ = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 4, 3, 0.2),
-        execution=_execution_result(passed=False),
+        generation=FakeGeneration("print('x')", 4, 3, 0.2),
+        execution=make_execution_result(passed=False),
         classified_as=FailureType.RUNTIME,
         task=task,
     )
@@ -128,11 +83,11 @@ def test_baseline_uses_task_prompt_unchanged(monkeypatch: pytest.MonkeyPatch):
 def test_baseline_forwards_return_hidden_states(
     monkeypatch: pytest.MonkeyPatch, return_hidden_states: bool
 ):
-    model = _FakeModel(_FakeGeneration("print('x')", 4, 3, 0.2))
+    model = FakeModel([FakeGeneration("print('x')", 4, 3, 0.2)])
     # Minimal stubs — we only care that generate() received the right flag.
-    monkeypatch.setattr(baseline_module, "execute_candidate", lambda *_, **__: _execution_result(passed=False))
+    monkeypatch.setattr(baseline_module, "execute_candidate", lambda *_, **__: make_execution_result(passed=False))
     monkeypatch.setattr(baseline_module, "classify_result", lambda _: FailureType.RUNTIME)
-    run_baseline(task=_task(), model=model, budget_B=1, return_hidden_states=return_hidden_states)
+    run_baseline(task=make_task(), model=model, budget_B=1, return_hidden_states=return_hidden_states)
     assert model.calls[0][1] is return_hidden_states
 
 
@@ -142,8 +97,8 @@ def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
     # AttemptRecord.tokens and elapsed_s must be the sum of inference + execution costs.
     _, result, _ = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 12, 34, 0.25),
-        execution=_execution_result(passed=False, elapsed_s=0.75),
+        generation=FakeGeneration("print('x')", 12, 34, 0.25),
+        execution=make_execution_result(passed=False, elapsed_s=0.75),
         classified_as=FailureType.ASSERTION,
     )
     record = result.attempts[0]
@@ -154,8 +109,8 @@ def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
 def test_baseline_uses_verifier_timeout_override_when_provided(monkeypatch: pytest.MonkeyPatch):
     _, _, captured = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 4, 3, 0.2),
-        execution=_execution_result(passed=False),
+        generation=FakeGeneration("print('x')", 4, 3, 0.2),
+        execution=make_execution_result(passed=False),
         classified_as=FailureType.SYNTAX,
         verifier_timeout_s=1.75,
     )
@@ -163,11 +118,11 @@ def test_baseline_uses_verifier_timeout_override_when_provided(monkeypatch: pyte
 
 
 def test_baseline_falls_back_to_task_timeout_when_override_missing(monkeypatch: pytest.MonkeyPatch):
-    task = _task()
+    task = make_task()
     _, _, captured = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 4, 3, 0.2),
-        execution=_execution_result(passed=False),
+        generation=FakeGeneration("print('x')", 4, 3, 0.2),
+        execution=make_execution_result(passed=False),
         classified_as=FailureType.SYNTAX,
         task=task,
     )
@@ -178,8 +133,8 @@ def test_baseline_uses_classifier_output_for_failure_type(monkeypatch: pytest.Mo
     # The policy must store whatever classify_result returns, not re-derive it.
     _, result, _ = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('x')", 4, 3, 0.2),
-        execution=_execution_result(passed=False),
+        generation=FakeGeneration("print('x')", 4, 3, 0.2),
+        execution=make_execution_result(passed=False),
         classified_as=FailureType.RUNTIME,
     )
     assert result.attempts[0].failure_type == FailureType.RUNTIME
@@ -190,8 +145,8 @@ def test_baseline_returns_single_attempt_tuple_and_selected_candidate_on_pass(
 ):
     _, result, captured = _run_with_stubs(
         monkeypatch,
-        generation=_FakeGeneration("print('passed')", 6, 5, 0.3),
-        execution=_execution_result(passed=True),
+        generation=FakeGeneration("print('passed')", 6, 5, 0.3),
+        execution=make_execution_result(passed=True),
         classified_as=FailureType.PASS,
     )
     assert isinstance(result.attempts, tuple)
@@ -203,16 +158,10 @@ def test_baseline_returns_single_attempt_tuple_and_selected_candidate_on_pass(
 
 
 @pytest.mark.parametrize("budget", [0, -1])
-def test_baseline_rejects_invalid_budget(
-    budget: int,
-):
-    model = _FakeModel(_FakeGeneration("print('x')", 4, 3, 0.2))
+def test_baseline_rejects_invalid_budget(budget: int):
+    model = FakeModel([FakeGeneration("print('x')", 4, 3, 0.2)])
     with pytest.raises(ValueError):
-        run_baseline(
-            task=_task(),
-            model=model,
-            budget_B=budget,
-        )
+        run_baseline(task=make_task(), model=model, budget_B=budget)
 
 
 # ── _extract_candidate_code unit tests ────────────────────────────────────────
