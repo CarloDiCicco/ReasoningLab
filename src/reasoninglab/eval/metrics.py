@@ -1,0 +1,153 @@
+"""
+eval/metrics.py
+───────────────
+Defines the per-attempt data record and computes aggregate experiment metrics
+from a completed policy run.
+
+Two public data types:
+  - AttemptRecord : one row of data per model inference + execution attempt.
+                    Created by the policy, passed to both logger and metrics.
+  - RunMetrics    : aggregate statistics for one policy arm over all tasks.
+
+One public function:
+  - compute_metrics(records) -> RunMetrics
+
+Consumed by:
+  - eval/runner.py     : creates AttemptRecord instances during the run loop
+  - io/jsonl_logger.py : serializes AttemptRecord to JSONL (dataclasses.asdict)
+  - cli.py             : prints RunMetrics summary at the end of a run
+
+Metrics computed (matches README experiment design):
+  - pass_rate      : fraction of tasks with at least one passing attempt (H1 primary)
+  - mean_elapsed_s : mean per-attempt wall-clock latency (cost accounting)
+  - mean_tokens    : mean per-attempt token count, prompt + completion (cost accounting)
+  - failure_dist   : fraction of FAILED attempts per FailureType (H1 taxonomy analysis)
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from typing import Sequence
+
+from reasoninglab.verify.taxonomy import FailureType
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data records
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class AttemptRecord:
+    """Data captured for one model inference + execution attempt.
+
+    One AttemptRecord is created per attempt (not per task).  A single task
+    may have up to B AttemptRecords depending on the policy.
+
+    frozen=True: immutable after creation, consistent with ExecutionResult.
+    """
+
+    task_id: str         # unique task identifier, from TaskRecord.task_id
+    policy: str          # "baseline" | "best_of_b" | "repair_b"
+    attempt_idx: int     # 0-based index within budget B for this task
+    passed: bool         # True if this attempt produced a passing solution
+    failure_type: FailureType  # FailureType.PASS if passed, else failure category
+    elapsed_s: float     # wall-clock seconds for this attempt (inference + execution)
+    tokens: int          # total tokens consumed (prompt tokens + completion tokens)
+
+
+@dataclass(frozen=True)
+class RunMetrics:
+    """Aggregate statistics for one policy arm across all tasks in a run.
+
+    One RunMetrics is produced per policy arm by compute_metrics().
+    """
+
+    # Fraction of tasks where at least one attempt passed.
+    # Computed at task level (not attempt level): a task with 3 failing attempts
+    # and 1 passing attempt counts as 1 passed task, not 0.25.
+    pass_rate: float
+
+    # Mean wall-clock latency per attempt, in seconds.
+    mean_elapsed_s: float
+
+    # Mean token count per attempt (prompt + completion).
+    mean_tokens: float
+
+    # Total number of attempts across all tasks (sum of budget used).
+    total_attempts: int
+
+    # Number of unique tasks in this run.
+    total_tasks: int
+
+    # Fraction of FAILED attempts per failure category.
+    # Keys are FailureType string values ("syntax", "assertion", etc.).
+    # Passing attempts (failure_type == PASS) are excluded from this distribution.
+    # Empty dict when all attempts pass.
+    # Values sum to 1.0 (within floating-point precision).
+    failure_dist: dict[str, float]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_metrics(records: Sequence[AttemptRecord]) -> RunMetrics:
+    """Compute aggregate RunMetrics from all attempt records of a policy run.
+
+    Args:
+        records: All AttemptRecords produced during one policy run (all tasks,
+                 all attempts).  Must be non-empty.
+
+    Returns:
+        RunMetrics with pass rate, latency, token cost, and failure statistics.
+
+    Raises:
+        ValueError: if records is empty (no data to aggregate).
+    """
+    if not records:
+        raise ValueError(
+            "compute_metrics received an empty records list — nothing to aggregate."
+        )
+
+    # ── Pass rate (task-level) ────────────────────────────────────────────────
+    # A task is counted as "passed" if ANY of its attempts passed.
+    # This matches the README definition of pass@1: did the policy ultimately
+    # produce a correct solution for this task within budget B?
+    #
+    # Counting passing ATTEMPTS instead of passing TASKS would inflate the metric
+    # for multi-attempt policies (best_of_b, repair_b) vs baseline.
+    all_task_ids = {r.task_id for r in records}
+    passed_task_ids = {r.task_id for r in records if r.passed}
+    pass_rate = len(passed_task_ids) / len(all_task_ids)
+
+    # ── Per-attempt cost averages ─────────────────────────────────────────────
+    n = len(records)
+    mean_elapsed_s = sum(r.elapsed_s for r in records) / n  # mean of time (s) used
+    mean_tokens    = sum(r.tokens    for r in records) / n  # mean of tokens used
+
+    # ── Failure distribution (attempt-level, failed attempts only) ────────────
+    # Only failed attempts contribute to the taxonomy distribution.
+    # Passing attempts are excluded: their "failure_type" is PASS, which is not
+    # a failure mode and would distort the distribution used in H1 analysis.
+    failed = [r for r in records if not r.passed]
+    if failed:
+        # Count occurrences of each FailureType string value.
+        counts = Counter(r.failure_type.value for r in failed)
+        total_failed = len(failed)
+        failure_dist: dict[str, float] = {
+            ft_value: count / total_failed
+            for ft_value, count in counts.items()
+        }
+    else:
+        # All attempts passed — no failure distribution to report.
+        failure_dist = {}
+
+    return RunMetrics(
+        pass_rate=pass_rate,
+        mean_elapsed_s=mean_elapsed_s,
+        mean_tokens=mean_tokens,
+        total_attempts=n,
+        total_tasks=len(all_task_ids),
+        failure_dist=failure_dist,
+    )
