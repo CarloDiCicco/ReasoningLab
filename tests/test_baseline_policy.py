@@ -4,15 +4,22 @@ from dataclasses import dataclass
 
 import pytest
 
+# Import the module object so we can monkeypatch names inside it at test time.
 import reasoninglab.policies.baseline as baseline_module
-from reasoninglab.policies.baseline import _extract_candidate_code, run_baseline
+from reasoninglab.policies._utils import _extract_candidate_code
+from reasoninglab.policies.baseline import run_baseline
 from reasoninglab.tasks.schema import TaskRecord
 from reasoninglab.verify.executor import ExecutionResult
 from reasoninglab.verify.taxonomy import FailureType
 
 
+# ── Fakes ─────────────────────────────────────────────────────────────────────
+# These stand-ins replace real I/O boundaries (model inference, subprocess
+# execution) so tests run instantly and deterministically.
+
 @dataclass
 class _FakeGeneration:
+    # Mirrors the fields of GenerationLike that run_baseline reads.
     text: str
     prompt_tokens: int
     completion_tokens: int
@@ -20,6 +27,8 @@ class _FakeGeneration:
 
 
 class _FakeModel:
+    # Always returns the same canned generation; records every call so tests
+    # can assert on what prompt and flags were passed to generate().
     def __init__(self, generation: _FakeGeneration) -> None:
         self._generation = generation
         self.calls: list[tuple[str, bool]] = []
@@ -28,6 +37,8 @@ class _FakeModel:
         self.calls.append((prompt, return_hidden_states))
         return self._generation
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _task(prompt: str = "Solve this.\nReturn valid Python.") -> TaskRecord:
     return TaskRecord(
@@ -59,6 +70,8 @@ def _run_with_stubs(
     task: TaskRecord | None = None,
     budget_B: int = 1,
 ):
+    # captured holds the exact arguments that run_baseline passed to execute_candidate,
+    # letting tests assert on wiring (e.g. correct timeout, correct test_code).
     captured: dict[str, object] = {}
 
     def _fake_execute(candidate_code: str, test_code: str, timeout_s: float) -> ExecutionResult:
@@ -67,6 +80,8 @@ def _run_with_stubs(
         captured["timeout_s"] = timeout_s
         return execution
 
+    # Patch on baseline_module (not on executor/taxonomy directly) because
+    # run_baseline looks up these names in its own module namespace after import.
     monkeypatch.setattr(baseline_module, "execute_candidate", _fake_execute)
     monkeypatch.setattr(baseline_module, "classify_result", lambda _: classified_as)
 
@@ -80,7 +95,11 @@ def _run_with_stubs(
     return model, result, captured
 
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
 def test_baseline_calls_generate_once_even_when_budget_is_larger(monkeypatch: pytest.MonkeyPatch):
+    # Baseline is one-shot by design: budget_B is accepted but ignored after the
+    # guard check. A larger budget must not cause extra generate() calls.
     model, _, _ = _run_with_stubs(
         monkeypatch,
         generation=_FakeGeneration("print('x')", 4, 3, 0.2),
@@ -92,6 +111,7 @@ def test_baseline_calls_generate_once_even_when_budget_is_larger(monkeypatch: py
 
 
 def test_baseline_uses_task_prompt_unchanged(monkeypatch: pytest.MonkeyPatch):
+    # The policy must pass the prompt verbatim — no trimming or reformatting.
     prompt = "  Keep spacing.\nAnd new lines.\n"
     task = _task(prompt=prompt)
     model, _, _ = _run_with_stubs(
@@ -109,10 +129,7 @@ def test_baseline_forwards_return_hidden_states(
     monkeypatch: pytest.MonkeyPatch, return_hidden_states: bool
 ):
     model = _FakeModel(_FakeGeneration("print('x')", 4, 3, 0.2))
-    '''
-    monkeypatching replace the "execute_candidate" and "classify_result" functions
-    with dumb stubs that return a fixed ExecutionResult and FailureType respectively
-    '''
+    # Minimal stubs — we only care that generate() received the right flag.
     monkeypatch.setattr(baseline_module, "execute_candidate", lambda *_, **__: _execution_result(passed=False))
     monkeypatch.setattr(baseline_module, "classify_result", lambda _: FailureType.RUNTIME)
     run_baseline(task=_task(), model=model, budget_B=1, return_hidden_states=return_hidden_states)
@@ -122,6 +139,7 @@ def test_baseline_forwards_return_hidden_states(
 def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    # AttemptRecord.tokens and elapsed_s must be the sum of inference + execution costs.
     _, result, _ = _run_with_stubs(
         monkeypatch,
         generation=_FakeGeneration("print('x')", 12, 34, 0.25),
@@ -129,8 +147,8 @@ def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
         classified_as=FailureType.ASSERTION,
     )
     record = result.attempts[0]
-    assert record.tokens == 46
-    assert record.elapsed_s == pytest.approx(1.0)
+    assert record.tokens == 46        # 12 + 34
+    assert record.elapsed_s == pytest.approx(1.0)  # 0.25 + 0.75
 
 
 def test_baseline_uses_verifier_timeout_override_when_provided(monkeypatch: pytest.MonkeyPatch):
@@ -157,6 +175,7 @@ def test_baseline_falls_back_to_task_timeout_when_override_missing(monkeypatch: 
 
 
 def test_baseline_uses_classifier_output_for_failure_type(monkeypatch: pytest.MonkeyPatch):
+    # The policy must store whatever classify_result returns, not re-derive it.
     _, result, _ = _run_with_stubs(
         monkeypatch,
         generation=_FakeGeneration("print('x')", 4, 3, 0.2),
@@ -179,6 +198,7 @@ def test_baseline_returns_single_attempt_tuple_and_selected_candidate_on_pass(
     assert len(result.attempts) == 1
     assert result.attempts[0].policy == "baseline"
     assert result.attempts[0].attempt_idx == 0
+    # selected_candidate must equal the extracted code that was passed to the executor.
     assert result.selected_candidate == captured["candidate_code"]
 
 
@@ -195,13 +215,16 @@ def test_baseline_rejects_invalid_budget(
         )
 
 
+# ── _extract_candidate_code unit tests ────────────────────────────────────────
+# These test the parsing logic in isolation, independent of any policy run.
+
 def test_extract_candidate_code_prefers_first_python_fence():
     text = (
         "Intro\n"
         "```text\n"
         "not_python()\n"
         "```\n"
-        "```PYTHON\n"
+        "```PYTHON\n"          # case-insensitive match
         "def solve():\n"
         "    return 1\n"
         "```\n"
@@ -222,5 +245,6 @@ def test_extract_candidate_code_uses_first_generic_fence_when_no_python():
 
 
 def test_extract_candidate_code_falls_back_to_raw_text():
+    # No fences at all — return the raw text unchanged.
     raw = "def solve(x):\n    return x + 1\n"
     assert _extract_candidate_code(raw) == raw
