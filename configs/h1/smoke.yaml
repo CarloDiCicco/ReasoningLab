@@ -1,0 +1,30 @@
+# Minimal H1 smoke config — 5 tasks (from HumanEval+), baseline, budget=1.
+# Used for quick end-to-end validation: does the CLI → loader → model → policy →
+# executor → logger → metrics pipeline run without errors?
+#
+# Usage:
+#   python -m reasoninglab.cli --config configs/h1/smoke.yaml
+#
+# To test other policies or budgets without editing this file:
+#   python -m reasoninglab.cli --config configs/h1/smoke.yaml --policy best_of_b --budget 3
+
+experiment_id: h1-smoke
+hypothesis: H1
+policy: baseline
+budget_B: 1
+seed: 0
+model_id: Qwen/Qwen3-4B-Instruct-2507
+max_tasks: 5
+
+generation:
+  max_new_tokens: 512
+  do_sample: false
+
+runtime:
+  verifier_timeout_s: 8.0
+  capture_device_map: true
+
+paths:
+  tasks_file: data/humaneval_plus.jsonl
+  runs_root: runs
+  results_root: results/h1

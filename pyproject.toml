@@ -24,6 +24,12 @@ model = [
     "accelerate>=0.30",      # device_map="auto" and CPU-offload support
     "bitsandbytes>=0.43",    # 4-bit NF4 quantization (Windows support from 0.42+)
 ]
+data = [
+    # Dataset preparation scripts (scripts/prepare_*.py).
+    "evalplus",          # HumanEval+ dataset access
+    "datasets",          # HuggingFace datasets library
+    "huggingface_hub",   # Direct file downloads from HuggingFace (LiveCodeBench)
+]
 dev = [
     "pytest>=8.0",
 ]
