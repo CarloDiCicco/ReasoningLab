@@ -4,7 +4,7 @@ eval/runner.py
 Orchestrates one policy arm across a full task list: calls the policy for each
 task, logs every attempt immediately, aggregates metrics, and writes the summary.
 
-This module is the glue between the pieces built in steps 1-6:
+This module is the glue between the pieces built in the previous steps:
 
     run_experiment()
       ├─ for each task → policy_fn(task, model, budget_B, ...) → PolicyResult
@@ -42,7 +42,7 @@ from reasoninglab.tasks.schema import TaskRecord
 def run_experiment(
     tasks: list[TaskRecord],
     model: SupportsGenerate,
-    policy_fn: Callable[..., PolicyResult],
+    policy_fn: Callable[..., PolicyResult], #policy_fn is a variable expected to hold a function, the function can take any argument (...), that function must return a PolicyResult
     policy_name: str,
     budget_B: int,
     attempts_path: Path,
