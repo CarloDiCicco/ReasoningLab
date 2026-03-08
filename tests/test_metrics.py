@@ -7,7 +7,7 @@ Tests cover:
   - AttemptRecord construction and immutability
   - compute_metrics() pass_rate is task-level (not attempt-level)
   - compute_metrics() failure_dist includes only failed attempts, sums to 1.0
-  - compute_metrics() mean_elapsed_s and mean_tokens are correct
+  - compute_metrics() mean_elapsed_s, mean_prompt_tokens, mean_completion_tokens are correct
   - compute_metrics() total_attempts and total_tasks counts
   - Edge cases: all pass, all fail, single record, empty raises ValueError
 """
@@ -33,7 +33,8 @@ def _attempt(
     passed: bool = False,
     failure_type: FailureType = FailureType.ASSERTION,
     elapsed_s: float = 1.0,
-    tokens: int = 100,
+    prompt_tokens: int = 80,
+    completion_tokens: int = 20,
 ) -> AttemptRecord:
     """Construct an AttemptRecord with sensible defaults for test brevity."""
     return AttemptRecord(
@@ -43,7 +44,8 @@ def _attempt(
         passed=passed,
         failure_type=failure_type,
         elapsed_s=elapsed_s,
-        tokens=tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 
@@ -54,10 +56,11 @@ def _attempt(
 class TestAttemptRecord:
 
     def test_construction(self):
-        r = _attempt(task_id="abc", passed=True, tokens=200)
+        r = _attempt(task_id="abc", passed=True, prompt_tokens=150, completion_tokens=50)
         assert r.task_id == "abc"
         assert r.passed is True
-        assert r.tokens == 200
+        assert r.prompt_tokens == 150
+        assert r.completion_tokens == 50
 
     def test_frozen(self):
         """AttemptRecord must be immutable after construction."""
@@ -209,24 +212,26 @@ class TestCostAverages:
         m = compute_metrics(records)
         assert m.mean_elapsed_s == pytest.approx(3.0)
 
-    def test_mean_tokens(self):
+    def test_mean_prompt_and_completion_tokens(self):
         records = [
-            _attempt(task_id="t1", tokens=100),
-            _attempt(task_id="t2", tokens=300),
+            _attempt(task_id="t1", prompt_tokens=100, completion_tokens=50),
+            _attempt(task_id="t2", prompt_tokens=300, completion_tokens=150),
         ]
         m = compute_metrics(records)
-        assert m.mean_tokens == pytest.approx(200.0)
+        assert m.mean_prompt_tokens     == pytest.approx(200.0)
+        assert m.mean_completion_tokens == pytest.approx(100.0)
 
     def test_averages_include_all_attempts(self):
         """Averages are over ALL attempts, not per-task.  A task with 3 attempts
         contributes 3 values to the mean, not 1."""
         records = [
-            _attempt(task_id="t1", attempt_idx=0, elapsed_s=1.0, tokens=100),
-            _attempt(task_id="t1", attempt_idx=1, elapsed_s=3.0, tokens=300),
+            _attempt(task_id="t1", attempt_idx=0, elapsed_s=1.0, prompt_tokens=100, completion_tokens=20),
+            _attempt(task_id="t1", attempt_idx=1, elapsed_s=3.0, prompt_tokens=300, completion_tokens=60),
         ]
         m = compute_metrics(records)
-        assert m.mean_elapsed_s == pytest.approx(2.0)   # (1+3)/2
-        assert m.mean_tokens    == pytest.approx(200.0)  # (100+300)/2
+        assert m.mean_elapsed_s         == pytest.approx(2.0)    # (1+3)/2
+        assert m.mean_prompt_tokens     == pytest.approx(200.0)  # (100+300)/2
+        assert m.mean_completion_tokens == pytest.approx(40.0)   # (20+60)/2
         assert m.total_attempts == 2
         assert m.total_tasks    == 1
 
@@ -245,12 +250,13 @@ class TestEdgeCases:
         r = _attempt(
             task_id="solo", passed=False,
             failure_type=FailureType.TIMEOUT,
-            elapsed_s=8.1, tokens=512,
+            elapsed_s=8.1, prompt_tokens=400, completion_tokens=112,
         )
         m = compute_metrics([r])
-        assert m.pass_rate      == 0.0
-        assert m.mean_elapsed_s == pytest.approx(8.1)
-        assert m.mean_tokens    == pytest.approx(512.0)
+        assert m.pass_rate              == 0.0
+        assert m.mean_elapsed_s         == pytest.approx(8.1)
+        assert m.mean_prompt_tokens     == pytest.approx(400.0)
+        assert m.mean_completion_tokens == pytest.approx(112.0)
         assert m.total_attempts == 1
         assert m.total_tasks    == 1
         assert m.failure_dist   == {"timeout": pytest.approx(1.0)}

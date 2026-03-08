@@ -21,7 +21,7 @@ Show ML Research Engineer-grade capability:
     - NVIDIA GeForce RTX 4050 6GB VRAM GPU
 
 ## Qwen Runtime Settings (3B vs 7B)
-- `Qwen2.5-Coder-3B-Instruct` and `Qwen/Qwen3-4B-Instruct-2507`: run normally with `device_map="auto"` on this machine (RTX 4050 6GB), without CPU offload settings.
+- `Qwen2.5-Coder-3B-Instruct`, `Qwen/Qwen3-4B-Instruct-2507`, and `Qwen/Qwen3.5-4B`: run normally with `device_map="auto"` on this machine (RTX 4050 6GB), without CPU offload settings.
 - `Qwen2.5-Coder-7B-Instruct`: should be loaded with offload-capable settings (`device_map="auto"` + `max_memory` + offload enabled), even when CPU offload is not always used at runtime.
 - Reason: `device_map="auto"` uses a conservative placement policy. For 7B, it may decide to place some modules on CPU/disk depending on current VRAM state; if offload is not enabled, loading can fail.
 - If the printed device map is `{"": 0}`, all model weights are on GPU for that run (offload was allowed, but not used).
@@ -57,6 +57,7 @@ A **rule-based controller** that uses **external verifier feedback** + **H2 prob
 #### Task setup
 - Domain: **coding problems with deterministic unit tests** (objective verification).
 - Each run logs full trajectories: prompts, code, test results, errors, tokens, latency, and (when enabled) probe scores.
+- **Benchmark**: LiveCodeBench release_v6, LeetCode easy/medium, filtered to problems after 2024-05-01 (161 tasks). Note: LiveCodeBench v6 only covers up to ~Apr 2025; Qwen3.5-4B's training cutoff (~Sep 2025, estimated) post-dates the entire dataset, so contamination-free filtering is not feasible. All policy arms are equally affected, so relative comparisons remain valid.
 
 #### Budget definition
 - **B = number of model calls per task** (primary budget for V1).
@@ -189,7 +190,7 @@ configs/
     smoke.yaml                       # Minimal config for quick end-to-end smoke validation.
 
 scripts/
-  smoke_test.py                      # Direct local smoke test for Qwen3-4B runtime.
+  smoke_test.py                      # Direct local smoke test for Qwen3.5-4B runtime.
   smoke_test_7b_offload.py          # Direct local smoke test for Qwen2.5-7B offload runtime.
 
 tests/

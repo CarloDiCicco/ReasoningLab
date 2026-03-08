@@ -94,7 +94,7 @@ def test_baseline_forwards_return_hidden_states(
 def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # AttemptRecord.tokens and elapsed_s must be the sum of inference + execution costs.
+    # AttemptRecord.prompt_tokens, completion_tokens, and elapsed_s must reflect inference + execution costs.
     _, result, _ = _run_with_stubs(
         monkeypatch,
         generation=FakeGeneration("print('x')", 12, 34, 0.25),
@@ -102,7 +102,8 @@ def test_baseline_tracks_tokens_and_elapsed_as_generation_plus_execution(
         classified_as=FailureType.ASSERTION,
     )
     record = result.attempts[0]
-    assert record.tokens == 46        # 12 + 34
+    assert record.prompt_tokens == 12
+    assert record.completion_tokens == 34
     assert record.elapsed_s == pytest.approx(1.0)  # 0.25 + 0.75
 
 

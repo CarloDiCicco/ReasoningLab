@@ -255,8 +255,8 @@ def main() -> None:
         help="Output JSONL path (default: data/lcb_leetcode.jsonl).",
     )
     parser.add_argument(
-        "--version", default="release_v5",
-        help="LCB version tag (default: release_v5).",
+        "--version", default="release_v6",
+        help="LCB version tag (default: release_v6).",
     )
     parser.add_argument(
         "--difficulty", default="easy,medium",
@@ -265,7 +265,8 @@ def main() -> None:
     parser.add_argument(
         "--after", default=None,
         help="Only include problems after this date (YYYY-MM-DD). "
-             "Use 2024-05-01 for Qwen3 contamination safety.",
+             "Use 2024-05-01 for Qwen3/Qwen3.5 contamination safety "
+             "(release_v6 only covers up to ~Apr 2025, so a later cutoff is not feasible).",
     )
     parser.add_argument(
         "--max-problems", type=int, default=None,

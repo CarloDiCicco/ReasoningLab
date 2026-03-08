@@ -50,6 +50,7 @@ def run_experiment(
     *,
     verifier_timeout_s: float | None = None,
     return_hidden_states: bool = False,
+    extra_summary_fields: dict | None = None,
 ) -> RunMetrics:
     """Run one policy arm over all tasks, logging attempts and returning metrics.
 
@@ -75,6 +76,8 @@ def run_experiment(
                               policy_fn.  None means each policy uses task.timeout_s.
         return_hidden_states: Whether to request hidden states from the model,
                               forwarded to policy_fn unchanged.
+        extra_summary_fields: Optional dict of additional fields to include in
+                              the summary JSONL line (e.g. model_id, tasks_file).
 
     Returns:
         RunMetrics aggregated across all tasks and all their attempts.
@@ -107,5 +110,5 @@ def run_experiment(
 
     # Aggregate after all tasks so metrics are consistent across the whole run.
     metrics = compute_metrics(all_attempts)
-    log_summary(summary_path, policy_name, metrics)
+    log_summary(summary_path, policy_name, metrics, extra=extra_summary_fields)
     return metrics

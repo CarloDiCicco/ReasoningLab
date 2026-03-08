@@ -9,7 +9,8 @@ to fit within the RTX 4050 6GB VRAM budget.
 
 Supported models (from README):
   Qwen/Qwen2.5-Coder-3B-Instruct  — 3B, device_map="auto", no offload
-  Qwen/Qwen3-4B-Instruct-2507     — 4B, device_map="auto", no offload
+  Qwen/Qwen3.5-4B                 — 4B, device_map="auto", no offload  [default]
+  Qwen/Qwen3-4B-Instruct-2507     — 4B, device_map="auto", no offload  [previous default]
   Qwen/Qwen2.5-Coder-7B-Instruct  — 7B, device_map="auto" + max_memory + offload
 
 Public API:
@@ -29,8 +30,41 @@ from dataclasses import dataclass
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 
 from reasoninglab.config.schema import GenerationConfig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom logits processor: presence penalty
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _PresencePenaltyLogitsProcessor(LogitsProcessor):
+    """Flat additive penalty on tokens already seen anywhere in the sequence.
+
+    Implements the same semantics as OpenAI's / vLLM's `presence_penalty`:
+    for every token that appears at least once in input_ids, subtract `penalty`
+    from its logit.  This discourages the model from repeating tokens it has
+    already used, regardless of how many times they appeared (unlike the
+    multiplicative `repetition_penalty` which scales with frequency).
+
+    penalty=0.0 is a no-op.  Typical effective range: 0.5–2.0.
+    Qwen3.5-4B model card recommends 1.5 for non-thinking general tasks.
+    """
+
+    def __init__(self, penalty: float, prompt_length: int) -> None:
+        self.penalty = penalty
+        self.prompt_length = prompt_length
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        for i, seq in enumerate(input_ids):
+            # Only penalize tokens that appeared in the *generated* portion.
+            # Penalizing prompt tokens would suppress unavoidable Python keywords
+            # (def, return, for, if, self...) from the very first generated token.
+            generated_ids = seq[self.prompt_length:]
+            unique_tokens = generated_ids.unique()
+            scores[i, unique_tokens] -= self.penalty
+        return scores
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,24 +224,49 @@ class QwenModel:
             GenerationOutput with text, token counts, latency, and optionally
             hidden states.
         """
-        # Tokenize and move inputs to the model's primary device.
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        # Format as a chat message and apply the model's chat template.
+        # enable_thinking=False suppresses Qwen3/3.5 <think>...</think> output,
+        # which would otherwise consume most of max_new_tokens and truncate
+        # the actual code.  For Qwen2.5 models the flag is silently ignored.
+        messages = [{"role": "user", "content": prompt}]
+        formatted = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        inputs = self.tokenizer(formatted, return_tensors="pt").to(self.model.device)
         prompt_tokens: int = inputs["input_ids"].shape[1]
 
         # Build generation kwargs.
         # temperature and top_p are only passed when do_sample=True.
         # Passing temperature=0.0 with do_sample=False triggers a warning in
         # some transformers versions and has no effect on greedy decoding.
+        # Build presence_penalty logits processor if penalty > 0.
+        # HF generate() does not natively support presence_penalty (only vLLM/SGLang do),
+        # so we implement it as a custom LogitsProcessor passed via logits_processor.
+        logits_processors = LogitsProcessorList()
+        if self.generation_config.presence_penalty > 0.0:
+            logits_processors.append(
+                _PresencePenaltyLogitsProcessor(self.generation_config.presence_penalty, prompt_tokens)
+            )
+
         gen_kwargs: dict = {
-            "max_new_tokens": self.generation_config.max_new_tokens,
-            "do_sample":      self.generation_config.do_sample,
+            "max_new_tokens":     self.generation_config.max_new_tokens,
+            "do_sample":          self.generation_config.do_sample,
             # Qwen models may not have pad_token_id set; eos_token_id is the
             # standard fallback to suppress a padding-related warning.
-            "pad_token_id":   self.tokenizer.eos_token_id,
+            "pad_token_id":       self.tokenizer.eos_token_id,
+            # Multiplicative penalty (HF native). 1.0 = no penalty.
+            "repetition_penalty": self.generation_config.repetition_penalty,
+            # Additive flat penalty via custom processor. No-op when list is empty.
+            "logits_processor":   logits_processors,
         }
         if self.generation_config.do_sample:
             gen_kwargs["temperature"] = self.generation_config.temperature
             gen_kwargs["top_p"]       = self.generation_config.top_p
+            gen_kwargs["top_k"]       = self.generation_config.top_k
+            gen_kwargs["min_p"]       = self.generation_config.min_p
 
         # Run generation and measure wall-clock inference time.
         start = time.perf_counter()

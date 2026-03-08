@@ -93,7 +93,8 @@ def _print_summary(policy_name: str, metrics: RunMetrics, run_dir: Path) -> None
     print(f"  tasks         : {metrics.total_tasks}")
     print(f"  attempts      : {metrics.total_attempts}")
     print(f"  pass_rate     : {metrics.pass_rate:.1%}")
-    print(f"  mean_tokens   : {metrics.mean_tokens:.1f}")
+    print(f"  mean_prompt_tokens    : {metrics.mean_prompt_tokens:.1f}")
+    print(f"  mean_completion_tokens: {metrics.mean_completion_tokens:.1f}")
     print(f"  mean_elapsed_s: {metrics.mean_elapsed_s:.3f}s")
     if metrics.failure_dist:
         print("  failure_dist  :")
@@ -172,6 +173,20 @@ def main() -> None:
         attempts_path=attempts_path,
         summary_path=summary_path,
         verifier_timeout_s=config.runtime.verifier_timeout_s,
+        extra_summary_fields={
+            "model_id":           config.model_id,
+            "tasks_file":         str(config.paths.tasks_file),
+            "budget_B":           config.budget_B,
+            "verifier_timeout_s": config.runtime.verifier_timeout_s,
+            "max_new_tokens":     config.generation.max_new_tokens,
+            "do_sample":          config.generation.do_sample,
+            "temperature":        config.generation.temperature,
+            "top_p":              config.generation.top_p,
+            "top_k":              config.generation.top_k,
+            "min_p":              config.generation.min_p,
+            "repetition_penalty": config.generation.repetition_penalty,
+            "presence_penalty":   config.generation.presence_penalty,
+        },
     )
 
     _print_summary(policy_name, metrics, run_dir)

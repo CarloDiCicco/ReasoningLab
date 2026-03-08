@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
 _FENCED_BLOCK_RE = re.compile(
     r"```(?P<lang>[^\n`]*)\n(?P<code>.*?)```",
     re.DOTALL,
@@ -16,6 +18,9 @@ Priority:
 '''
 def _extract_candidate_code(raw_text: str) -> str:
     """Extract code from markdown fences, falling back to raw text."""
+    # Strip any <think>...</think> reasoning content so fenced code blocks
+    # inside thinking are not mistakenly selected over the actual answer.
+    raw_text = _THINK_RE.sub("", raw_text)
     matches = list(_FENCED_BLOCK_RE.finditer(raw_text))
     if not matches:
         return raw_text

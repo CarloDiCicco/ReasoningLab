@@ -46,7 +46,8 @@ def _make_attempt(task_id: str, passed: bool, attempt_idx: int = 0) -> AttemptRe
         passed=passed,
         failure_type=FailureType.PASS if passed else FailureType.ASSERTION,
         elapsed_s=0.5,
-        tokens=10,
+        prompt_tokens=8,
+        completion_tokens=2,
     )
 
 
@@ -81,7 +82,7 @@ def _run_with_stubs(
     logged_summary_calls: list[tuple[str, RunMetrics]] = []
 
     monkeypatch.setattr(runner_module, "log_attempt", lambda _path, record: logged_attempts.append(record))
-    monkeypatch.setattr(runner_module, "log_summary", lambda _path, name, m: logged_summary_calls.append((name, m)))
+    monkeypatch.setattr(runner_module, "log_summary", lambda _path, name, m, **kw: logged_summary_calls.append((name, m)))
 
     model = FakeModel([])  # not called — policy_fn is fully stubbed
 

@@ -18,8 +18,12 @@ class GenerationConfig(BaseModel):
     # Keep deterministic by default; reproducibility first in H1.
     do_sample: bool = Field(default=False)
     # If sampling is enabled later, keep temperature within valid range.
-    temperature: float = Field(default=0.0, ge=0.0)
-    top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    temperature: float = Field(ge=0.0)
+    top_p: float = Field(gt=0.0, le=1.0)
+    top_k: int = Field(ge=0)
+    min_p: float = Field(ge=0.0, le=1.0)
+    repetition_penalty: float = Field(ge=1.0)
+    presence_penalty: float = Field(ge=0.0, le=2.0)
 
 
 class RuntimeConfig(BaseModel):

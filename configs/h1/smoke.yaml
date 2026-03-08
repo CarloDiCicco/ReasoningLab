@@ -14,17 +14,23 @@ policy: baseline
 budget_B: 1
 seed: 0
 model_id: Qwen/Qwen3-4B-Instruct-2507
-max_tasks: 5
+max_tasks: 20
 
 generation:
   max_new_tokens: 512
-  do_sample: false
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  presence_penalty: 0.0
 
 runtime:
   verifier_timeout_s: 8.0
   capture_device_map: true
 
 paths:
-  tasks_file: data/humaneval_plus.jsonl
+  tasks_file: data/lcb_leetcode.jsonl # data/humaneval_plus.jsonl
   runs_root: runs
   results_root: results/h1

@@ -97,7 +97,13 @@ def log_attempt(path: Path, record: AttemptRecord) -> None:
     _append_line(path, dataclasses.asdict(record))
 
 
-def log_summary(path: Path, policy: str, metrics: RunMetrics) -> None:
+def log_summary(
+    path: Path,
+    policy: str,
+    metrics: RunMetrics,
+    *,
+    extra: dict | None = None,
+) -> None:
     """Append one run summary as a JSON line to the given file.
 
     Called once per policy arm after all tasks have been processed.
@@ -112,14 +118,20 @@ def log_summary(path: Path, policy: str, metrics: RunMetrics) -> None:
         path:    Path to the summary JSONL file (e.g. results/<run>/summary.jsonl).
         policy:  Policy name string ("baseline" | "best_of_b" | "repair_b").
         metrics: The RunMetrics produced by compute_metrics() for this arm.
+        extra:   Optional dict of additional fields to include (e.g. model_id,
+                 tasks_file).  Merged into the output line after the standard
+                 metrics fields.
     """
     obj = {
         "policy":        policy,
         "pass_rate":     metrics.pass_rate,
         "mean_elapsed_s": metrics.mean_elapsed_s,
-        "mean_tokens":   metrics.mean_tokens,
+        "mean_prompt_tokens":     metrics.mean_prompt_tokens,
+        "mean_completion_tokens": metrics.mean_completion_tokens,
         "total_attempts": metrics.total_attempts,
         "total_tasks":   metrics.total_tasks,
         "failure_dist":  metrics.failure_dist,   # already dict[str, float]
     }
+    if extra:
+        obj.update(extra)
     _append_line(path, obj)

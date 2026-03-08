@@ -44,7 +44,8 @@ def run_baseline(
         passed=execution.passed,
         failure_type=failure_type,
         elapsed_s=generation.elapsed_s + execution.elapsed_s,
-        tokens=generation.prompt_tokens + generation.completion_tokens,
+        prompt_tokens=generation.prompt_tokens,
+        completion_tokens=generation.completion_tokens,
     )
 
     return PolicyResult(

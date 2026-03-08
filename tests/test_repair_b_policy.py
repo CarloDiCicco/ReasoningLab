@@ -258,9 +258,11 @@ def test_repair_b_tokens_and_elapsed_per_attempt(monkeypatch: pytest.MonkeyPatch
         classifications=[FailureType.ASSERTION, FailureType.RUNTIME],
         budget_B=2,
     )
-    assert result.attempts[0].tokens == 30          # 10 + 20
+    assert result.attempts[0].prompt_tokens == 10
+    assert result.attempts[0].completion_tokens == 20
     assert result.attempts[0].elapsed_s == pytest.approx(0.5)   # 0.1 + 0.4
-    assert result.attempts[1].tokens == 46          # 12 + 34
+    assert result.attempts[1].prompt_tokens == 12
+    assert result.attempts[1].completion_tokens == 34
     assert result.attempts[1].elapsed_s == pytest.approx(1.0)   # 0.25 + 0.75
 
 
