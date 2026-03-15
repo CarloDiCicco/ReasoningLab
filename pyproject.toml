@@ -30,6 +30,10 @@ data = [
     "datasets",          # HuggingFace datasets library
     "huggingface_hub",   # Direct file downloads from HuggingFace (LiveCodeBench)
 ]
+probe = [
+    # H2 linear probe training (scripts/train_probe.py).
+    "scikit-learn>=1.4",
+]
 dev = [
     "pytest>=8.0",
 ]

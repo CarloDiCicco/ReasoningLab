@@ -33,10 +33,39 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 from reasoninglab.eval.metrics import AttemptRecord, RunMetrics, compute_metrics
 from reasoninglab.io.jsonl_logger import log_attempt, log_summary
 from reasoninglab.policies.contracts import PolicyResult, SupportsGenerate
 from reasoninglab.tasks.schema import TaskRecord
+
+
+def _save_hidden_states(
+    hidden_states_dir: Path,
+    task_id: str,
+    result: PolicyResult,
+) -> None:
+    """Save per-attempt hidden states to a .npz file for H2 probe training.
+
+    File layout: hidden_states_dir/<task_id>.npz
+    Keys inside the .npz: "attempt_<i>_layer_<L>" → np.ndarray of shape (hidden_dim,).
+    Also stores "passed_<i>" → bool array for convenience.
+    """
+    hidden_states_dir.mkdir(parents=True, exist_ok=True)
+    assert result.hidden_states is not None
+
+    arrays: dict[str, np.ndarray] = {}
+    for attempt_idx, hs_dict in enumerate(result.hidden_states):
+        for layer_idx, vec in hs_dict.items():
+            arrays[f"attempt_{attempt_idx}_layer_{layer_idx}"] = vec
+        arrays[f"passed_{attempt_idx}"] = np.array(
+            result.attempts[attempt_idx].passed
+        )
+
+    # Sanitize task_id for filesystem (replace / with _).
+    safe_id = task_id.replace("/", "_")
+    np.savez(hidden_states_dir / f"{safe_id}.npz", **arrays)
 
 
 def run_experiment(
@@ -50,6 +79,7 @@ def run_experiment(
     *,
     verifier_timeout_s: float | None = None,
     return_hidden_states: bool = False,
+    hidden_states_dir: Path | None = None,
     extra_summary_fields: dict | None = None,
 ) -> RunMetrics:
     """Run one policy arm over all tasks, logging attempts and returning metrics.
@@ -107,6 +137,10 @@ def run_experiment(
         for record in result.attempts:
             all_attempts.append(record)
             log_attempt(attempts_path, record)
+
+        # Save hidden states to disk as .npz if available.
+        if result.hidden_states is not None and hidden_states_dir is not None:
+            _save_hidden_states(hidden_states_dir, task.task_id, result)
 
     # Aggregate after all tasks so metrics are consistent across the whole run.
     metrics = compute_metrics(all_attempts)

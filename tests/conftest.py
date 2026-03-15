@@ -24,6 +24,7 @@ class FakeGeneration:
     prompt_tokens: int
     completion_tokens: int
     elapsed_s: float
+    hidden_states: dict | None = None
 
 
 class FakeModel:

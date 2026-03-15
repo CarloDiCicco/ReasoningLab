@@ -114,12 +114,11 @@ class GenerationOutput:
     # attempt latency stored in AttemptRecord.elapsed_s.
     elapsed_s: float
 
-    # H2 preparation: last-token hidden state per transformer layer.
-    # Each element is a numpy array of shape (hidden_dim,) representing the
-    # model's internal state at the last token of the prompt.
-    # Index 0 = embedding layer output; indices 1..N = transformer block outputs.
+    # H2 preparation: last-token hidden state for selected transformer layers.
+    # Dict mapping layer index (int) to numpy array of shape (hidden_dim,).
+    # Contains layer 0 (embedding) + last 8 transformer layers.
     # None when generate() is called with return_hidden_states=False (H1 default).
-    hidden_states: list | None = None  # list[np.ndarray] when populated
+    hidden_states: dict | None = None  # dict[int, np.ndarray] when populated
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,30 +299,38 @@ class QwenModel:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _get_prompt_hidden_states(self, inputs: dict) -> list:
+    def _get_prompt_hidden_states(self, inputs: dict) -> dict:
         """Run one forward pass over the prompt and extract last-token hidden states.
 
         Called only when return_hidden_states=True (H2 runs).
 
+        We save only layer 0 (embedding output) and the last 8 transformer
+        layers to avoid storing 37 × 2560-dim vectors per datapoint.  Late
+        layers carry the strongest task-level signal for linear probing.
+
         Returns:
-            list of np.ndarray, each of shape (hidden_dim,).
-            Index 0: embedding layer output.
-            Indices 1..N: transformer block outputs (N = number of layers).
+            dict mapping layer index (int) to np.ndarray of shape (hidden_dim,).
+            Keys: {0, N-7, N-6, ..., N} where N = num_hidden_layers.
         """
         import numpy as np  # deferred import — only needed for H2 runs
 
         with torch.no_grad():
             forward_out = self.model(**inputs, output_hidden_states=True)
 
-        # forward_out.hidden_states: tuple of tensors, one per layer.
+        # forward_out.hidden_states: tuple of (num_layers + 1) tensors.
+        # Index 0 = embedding output, indices 1..N = transformer block outputs.
         # Each tensor has shape (batch=1, seq_len, hidden_dim).
-        # We take batch index [0] and sequence position [-1] (last token).
-        # .float() converts bfloat16/float16 to float32 before numpy conversion
-        # because numpy does not natively support bfloat16.
-        result: list = []
-        for layer_hs in forward_out.hidden_states:
-            last_token: np.ndarray = layer_hs[0, -1, :].float().cpu().numpy()
-            result.append(last_token)
+        all_hs = forward_out.hidden_states
+        num_layers = len(all_hs)  # num_hidden_layers + 1 (for embedding)
+
+        # Select layer 0 (embedding) + last 8 transformer layers.
+        selected_indices = [0] + list(range(max(1, num_layers - 8), num_layers))
+
+        result: dict = {}
+        for idx in selected_indices:
+            # .float() converts bfloat16/float16 to float32 for numpy compat.
+            vec: np.ndarray = all_hs[idx][0, -1, :].float().cpu().numpy()
+            result[idx] = vec
 
         return result
 

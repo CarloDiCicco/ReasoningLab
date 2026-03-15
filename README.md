@@ -20,12 +20,13 @@ Show ML Research Engineer-grade capability:
     - 13th Gen Intel(R) Core(TM) i9-13900H
     - NVIDIA GeForce RTX 4050 6GB VRAM GPU
 
-## Qwen Runtime Settings (3B vs 7B)
+## Qwen models Settings 
 - `Qwen2.5-Coder-3B-Instruct`, `Qwen/Qwen3-4B-Instruct-2507`, and `Qwen/Qwen3.5-4B`: run normally with `device_map="auto"` on this machine (RTX 4050 6GB), without CPU offload settings.
 - `Qwen2.5-Coder-7B-Instruct`: should be loaded with offload-capable settings (`device_map="auto"` + `max_memory` + offload enabled), even when CPU offload is not always used at runtime.
 - Reason: `device_map="auto"` uses a conservative placement policy. For 7B, it may decide to place some modules on CPU/disk depending on current VRAM state; if offload is not enabled, loading can fail.
 - If the printed device map is `{"": 0}`, all model weights are on GPU for that run (offload was allowed, but not used).
 - For experiment stability, keep 7B in offload-capable mode and always log `hf_device_map` for each run.
+- `Qwen/Qwen3.5-4B` has showed some "endless repetitions" problems on some LCB problems (Qwen Developers and users around the word encountered in different situations this problem too), with the implementation of the presence_penalty parameter, the problem decreased but did not solve completely.
 
 ## Loop 1 (L1): Budgeted Repair vs Best-of + Mechanistic Probing
 

@@ -37,3 +37,7 @@ class PolicyResult:
 
     attempts: tuple[AttemptRecord, ...]
     selected_candidate: str | None
+    # H2: per-attempt hidden states from the prompt forward pass.
+    # Tuple of dicts (one per attempt), each mapping layer index to np.ndarray.
+    # None when return_hidden_states=False (H1 default).
+    hidden_states: tuple[dict, ...] | None = None

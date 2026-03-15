@@ -164,6 +164,9 @@ def main() -> None:
         f"[cli] Starting run: policy={policy_name}, budget_B={config.budget_B}",
         flush=True,
     )
+    # H2: hidden states directory sits alongside attempts.jsonl in the run dir.
+    hidden_states_dir = run_dir / "hidden_states" if config.runtime.return_hidden_states else None
+
     metrics = run_experiment(
         tasks=tasks,
         model=model,
@@ -173,6 +176,8 @@ def main() -> None:
         attempts_path=attempts_path,
         summary_path=summary_path,
         verifier_timeout_s=config.runtime.verifier_timeout_s,
+        return_hidden_states=config.runtime.return_hidden_states,
+        hidden_states_dir=hidden_states_dir,
         extra_summary_fields={
             "model_id":           config.model_id,
             "tasks_file":         str(config.paths.tasks_file),

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import reasoninglab.eval.runner as runner_module
@@ -28,6 +29,7 @@ from reasoninglab.verify.taxonomy import FailureType
 
 from conftest import FakeModel, make_execution_result, make_gen, make_task
 from reasoninglab.eval.metrics import AttemptRecord
+from reasoninglab.tasks.schema import TaskRecord
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -227,3 +229,70 @@ def test_run_experiment_passes_return_hidden_states_to_policy(
         return_hidden_states=return_hidden_states,
     )
     assert call_log[0]["return_hidden_states"] is return_hidden_states
+
+
+# ── Tests: hidden states saving ──────────────────────────────────────────────
+
+def test_save_hidden_states_writes_npz(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify _save_hidden_states creates a .npz with correct keys and values."""
+    from reasoninglab.eval.runner import _save_hidden_states
+
+    hs_dir = tmp_path / "hidden_states"
+    fake_hs = {0: np.ones(16, dtype=np.float32), 28: np.zeros(16, dtype=np.float32)}
+    result = PolicyResult(
+        attempts=(_make_attempt("LCB/1234", passed=True),),
+        selected_candidate="x",
+        hidden_states=(fake_hs,),
+    )
+
+    _save_hidden_states(hs_dir, "LCB/1234", result)
+
+    npz_path = hs_dir / "LCB_1234.npz"
+    assert npz_path.exists()
+
+    data = np.load(npz_path)
+    assert "attempt_0_layer_0" in data
+    assert "attempt_0_layer_28" in data
+    assert "passed_0" in data
+    np.testing.assert_array_equal(data["attempt_0_layer_0"], np.ones(16, dtype=np.float32))
+    assert bool(data["passed_0"]) is True
+
+
+def test_run_experiment_saves_hidden_states_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """End-to-end: run_experiment with hidden_states_dir writes .npz files."""
+    fake_hs = {0: np.ones(8, dtype=np.float32), 28: np.zeros(8, dtype=np.float32)}
+    per_task_results = [
+        PolicyResult(
+            attempts=(_make_attempt("task-0", passed=False),),
+            selected_candidate=None,
+            hidden_states=(fake_hs,),
+        ),
+        PolicyResult(
+            attempts=(_make_attempt("task-1", passed=True),),
+            selected_candidate="x",
+            hidden_states=(fake_hs,),
+        ),
+    ]
+
+    tasks = [
+        TaskRecord(task_id=f"task-{i}", prompt=f"Task {i}", test_code="assert True", timeout_s=8.0)
+        for i in range(2)
+    ]
+    result_iter = iter(per_task_results)
+    monkeypatch.setattr(runner_module, "log_attempt", lambda _p, _r: None)
+    monkeypatch.setattr(runner_module, "log_summary", lambda *a, **kw: None)
+
+    hs_dir = tmp_path / "hs"
+    run_experiment(
+        tasks=tasks,
+        model=FakeModel([]),
+        policy_fn=lambda **_: next(result_iter),
+        policy_name="test",
+        budget_B=1,
+        attempts_path=tmp_path / "attempts.jsonl",
+        summary_path=tmp_path / "summary.jsonl",
+        hidden_states_dir=hs_dir,
+    )
+
+    assert (hs_dir / "task-0.npz").exists()
+    assert (hs_dir / "task-1.npz").exists()

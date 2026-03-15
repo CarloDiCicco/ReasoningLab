@@ -33,6 +33,8 @@ class RuntimeConfig(BaseModel):
     verifier_timeout_s: float = Field(default=8.0, gt=0.0)
     # Keep this flag so runs can log placement/device details.
     capture_device_map: bool = Field(default=True)
+    # H2: capture per-layer hidden states for probe training.
+    return_hidden_states: bool = Field(default=False)
 
 
 class PathsConfig(BaseModel):

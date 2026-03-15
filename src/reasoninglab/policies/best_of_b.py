@@ -29,6 +29,7 @@ def run_best_of_b(
     timeout_s = verifier_timeout_s if verifier_timeout_s is not None else task.timeout_s
 
     attempts: list[AttemptRecord] = []
+    hidden_states_list: list[dict] = []  # one dict per attempt (H2)
     selected_candidate: str | None = None  # set only when an attempt passes
 
     for attempt_idx in range(budget_B):
@@ -61,6 +62,8 @@ def run_best_of_b(
             completion_tokens=generation.completion_tokens,
         )
         attempts.append(attempt)
+        if generation.hidden_states is not None:
+            hidden_states_list.append(generation.hidden_states)
 
         # Early exit: no need to spend remaining budget once a passing solution is found.
         if execution.passed:
@@ -72,4 +75,5 @@ def run_best_of_b(
     return PolicyResult(
         attempts=tuple(attempts),
         selected_candidate=selected_candidate,  # None if all B attempts failed
+        hidden_states=tuple(hidden_states_list) if hidden_states_list else None,
     )

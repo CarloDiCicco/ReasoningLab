@@ -51,4 +51,5 @@ def run_baseline(
     return PolicyResult(
         attempts=(attempt,),
         selected_candidate=candidate_code if execution.passed else None,
+        hidden_states=(generation.hidden_states,) if generation.hidden_states is not None else None,
     )
