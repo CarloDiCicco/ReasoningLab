@@ -11,6 +11,7 @@ from reasoninglab.probing.data import (
     ProbeSample,
     _source_from_task_id,
     _task_id_from_filename,
+    build_averaged_feature_matrix,
     build_feature_matrix,
     load_samples,
 )
@@ -146,3 +147,40 @@ def test_build_feature_matrix_missing_layer_raises():
     samples = _make_samples(2)
     with pytest.raises(ValueError, match="Layer 999"):
         build_feature_matrix(samples, layers=[999])
+
+
+# ── Tests: build_averaged_feature_matrix ─────────────────────────────────────
+
+def test_averaged_feature_matrix_shape():
+    samples = _make_samples(5)
+    X, y = build_averaged_feature_matrix(samples, layers=[0, 29])
+    # Averaging two layers → output dim = HIDDEN_DIM (not 2 * HIDDEN_DIM).
+    assert X.shape == (5, HIDDEN_DIM)
+    assert y.shape == (5,)
+
+
+def test_averaged_feature_matrix_values():
+    """The output should be the element-wise mean of the selected layers."""
+    samples = _make_samples(1)
+    X, _ = build_averaged_feature_matrix(samples, layers=[0, 29])
+    expected = np.mean(
+        [samples[0].layer_vectors[0], samples[0].layer_vectors[29]], axis=0
+    )
+    np.testing.assert_allclose(X[0], expected, atol=1e-6)
+
+
+def test_averaged_feature_matrix_labels():
+    samples = _make_samples(4)
+    _, y = build_averaged_feature_matrix(samples, layers=[29])
+    np.testing.assert_array_equal(y, [1, 0, 1, 0])
+
+
+def test_averaged_feature_matrix_empty_samples_raises():
+    with pytest.raises(ValueError, match="samples.*empty"):
+        build_averaged_feature_matrix([], layers=[29])
+
+
+def test_averaged_feature_matrix_empty_layers_raises():
+    samples = _make_samples(2)
+    with pytest.raises(ValueError, match="layers.*empty"):
+        build_averaged_feature_matrix(samples, layers=[])

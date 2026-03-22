@@ -179,3 +179,52 @@ def build_feature_matrix(
     X = np.stack(rows).astype(np.float32)
     y = np.array(labels, dtype=np.int32)
     return X, y
+
+
+def build_averaged_feature_matrix(
+    samples: list[ProbeSample],
+    layers: list[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average hidden-state vectors across the given layers.
+
+    Instead of concatenating layers (n_layers * hidden_dim features), this
+    computes the element-wise mean across the selected layers, producing a
+    single hidden_dim-sized vector per sample.  Averaging smooths out
+    per-layer noise while preserving the signal shared across layers.
+
+    Args:
+        samples: Non-empty list of ProbeSample objects.
+        layers:  Which layer indices to average.  Must contain at least one.
+
+    Returns:
+        X: float32 array of shape (n_samples, hidden_dim).
+        y: int32 array of shape (n_samples,), 0 = fail, 1 = pass.
+
+    Raises:
+        ValueError: if samples is empty or layers is empty or a layer is missing.
+    """
+    if not samples:
+        raise ValueError("samples list is empty")
+    if not layers:
+        raise ValueError("layers list is empty")
+
+    rows: list[np.ndarray] = []
+    labels: list[int] = []
+
+    for sample in samples:
+        vecs: list[np.ndarray] = []
+        for layer_idx in layers:
+            if layer_idx not in sample.layer_vectors:
+                raise ValueError(
+                    f"Layer {layer_idx} not found in sample {sample.task_id}. "
+                    f"Available: {sorted(sample.layer_vectors.keys())}"
+                )
+            vecs.append(sample.layer_vectors[layer_idx])
+
+        # Element-wise mean across layers → shape (hidden_dim,).
+        rows.append(np.mean(vecs, axis=0))
+        labels.append(int(sample.passed))
+
+    X = np.stack(rows).astype(np.float32)
+    y = np.array(labels, dtype=np.int32)
+    return X, y

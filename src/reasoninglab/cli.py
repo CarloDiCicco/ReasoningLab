@@ -32,8 +32,11 @@ Design choices:
 from __future__ import annotations
 
 import argparse
+import functools
 from datetime import datetime
 from pathlib import Path
+
+import joblib
 
 from reasoninglab.config.schema import load_experiment_config
 from reasoninglab.eval.metrics import RunMetrics
@@ -42,18 +45,20 @@ from reasoninglab.models.qwen_local import QwenModel
 from reasoninglab.policies.baseline import run_baseline
 from reasoninglab.policies.best_of_b import run_best_of_b
 from reasoninglab.policies.contracts import PolicyResult
+from reasoninglab.policies.probe_guided import run_probe_guided
 from reasoninglab.policies.repair_b import run_repair_b
 from reasoninglab.tasks.loaders import load_tasks
 
 
 # ── Policy dispatch table ─────────────────────────────────────────────────────
 # Maps config.policy string to the actual callable.
-# H1 has exactly three policies; adding H3 (controller) would add one entry here.
+# probe_guided is bound with its probe and thresholds via functools.partial in main().
 
 _POLICY_FN = {
     "baseline": run_baseline,
     "best_of_b": run_best_of_b,
     "repair_b": run_repair_b,
+    "probe_guided": run_probe_guided,
 }
 
 
@@ -125,6 +130,35 @@ def main() -> None:
 
     policy_name: str = config.policy
     policy_fn_base = _POLICY_FN[policy_name]
+
+    # ── Probe-guided: load the probe and bind it to the policy function ───────
+    # For probe_guided, we load the serialized sklearn Pipeline from disk and
+    # bind it (along with probe_layer and threshold) as keyword-only defaults
+    # using functools.partial. This keeps the policy function's public signature
+    # identical to all other policies (task, model, budget_B, ...) from the
+    # runner's perspective, while injecting the probe transparently.
+    if policy_name == "probe_guided":
+        if config.probe is None:
+            raise ValueError(
+                "Policy 'probe_guided' requires a [probe] section in the config "
+                "with probe_path, probe_layer, and threshold."
+            )
+        probe_path = Path(config.probe.probe_path)
+        if not probe_path.exists():
+            raise FileNotFoundError(f"Probe file not found: {probe_path}")
+        print(f"[cli] Loading probe from {probe_path} ...", flush=True)
+        probe_pipeline = joblib.load(probe_path)
+        policy_fn_base = functools.partial(
+            run_probe_guided,
+            probe=probe_pipeline,
+            probe_layer=config.probe.probe_layer,
+            threshold=config.probe.threshold,
+        )
+        print(
+            f"[cli] Probe loaded: layer={config.probe.probe_layer}, "
+            f"threshold={config.probe.threshold}",
+            flush=True,
+        )
 
     # ── Load tasks ────────────────────────────────────────────────────────────
     print(f"[cli] Loading tasks from {config.paths.tasks_file} ...", flush=True)

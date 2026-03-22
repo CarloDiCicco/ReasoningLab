@@ -1,0 +1,29 @@
+# H2 eval: repair_b policy on fresh LCB tasks (before 2024-05-01).
+# B=3: attempt 0 on original prompt, attempts 1-2 repair with error feedback.
+
+experiment_id: h2-eval-repair_b
+hypothesis: H2
+policy: repair_b
+budget_B: 3
+seed: 0
+model_id: Qwen/Qwen3-4B-Instruct-2507
+
+generation:
+  max_new_tokens: 768
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  presence_penalty: 0.0
+
+runtime:
+  verifier_timeout_s: 8.0
+  capture_device_map: true
+  return_hidden_states: false
+
+paths:
+  tasks_file: data/eval_tasks_before_20240501.jsonl
+  runs_root: runs
+  results_root: results/h2

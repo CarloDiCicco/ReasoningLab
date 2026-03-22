@@ -6,8 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-# Allow only supported H1 policies. Literal gives strict validation at parse time.
-PolicyName = Literal["baseline", "best_of_b", "repair_b"]
+# Supported policies. Literal gives strict validation at parse time.
+PolicyName = Literal["baseline", "best_of_b", "repair_b", "probe_guided"]
 
 
 class GenerationConfig(BaseModel):
@@ -48,6 +48,24 @@ class PathsConfig(BaseModel):
     results_root: Path = Field(default=Path("results/h1"))
 
 
+class ProbeConfig(BaseModel):
+    """Configuration for the probe_guided policy's linear probe.
+
+    The probe is a fitted sklearn Pipeline (StandardScaler → PCA → LogisticRegression)
+    serialized to disk with joblib. It predicts P(pass) from the model's hidden states
+    at a specific transformer layer, scored once per task before any generation.
+    """
+
+    # Path to the .joblib file produced by scripts/train_probe.py.
+    probe_path: str = Field(description="Path to fitted sklearn Pipeline (.joblib)")
+    # Transformer layer whose hidden states are fed to the probe.
+    # Default 35 = second-to-last decoder block of Qwen3-4B, strongest signal.
+    probe_layer: int = Field(default=35, ge=0)
+    # P(pass) cut-off: >= threshold → repair strategy; < threshold → retry strategy.
+    # Default 0.5 maps to the probe's natural argmax decision boundary.
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class ExperimentConfig(BaseModel):
     """Top-level H1 experiment contract loaded from config files."""
 
@@ -65,6 +83,8 @@ class ExperimentConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     paths: PathsConfig
+    # Required when policy="probe_guided"; ignored for all other policies.
+    probe: ProbeConfig | None = Field(default=None)
 
     @field_validator("experiment_id", "model_id", "hypothesis")
     @classmethod

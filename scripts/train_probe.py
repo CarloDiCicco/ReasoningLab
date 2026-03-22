@@ -29,7 +29,7 @@ import joblib
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-from reasoninglab.probing.data import ProbeSample, build_feature_matrix, load_samples
+from reasoninglab.probing.data import ProbeSample, build_averaged_feature_matrix, build_feature_matrix, load_samples
 from reasoninglab.probing.probe import ProbeResult, train_probe
 
 
@@ -203,6 +203,32 @@ def main() -> None:
         layer_pipelines[layer_idx] = layer_pipeline
         print(f"  layer {layer_idx}: AUC={result.test_auc:.3f} (PCA k={result.n_features_pca})", flush=True)
 
+    # 3b. Averaged-layer analysis.
+    # Try several combinations of layers averaged element-wise into a single
+    # 2560-dim vector. Averaging smooths per-layer noise while preserving
+    # the shared pass/fail signal. Better sample-to-feature ratio than concat.
+    avg_combos = [
+        ("avg_35-36", [35, 36]),
+        ("avg_34-36", [34, 35, 36]),
+        ("avg_33-36", [33, 34, 35, 36]),
+        ("avg_29-36", list(range(29, 37))),
+    ]
+    avg_pipelines: dict[str, object] = {}
+    print("[probe] Averaged-layer analysis:", flush=True)
+    for label, avg_layers in avg_combos:
+        X_train, y_train = build_averaged_feature_matrix(train_samples, layers=avg_layers)
+        X_test, y_test = build_averaged_feature_matrix(test_samples, layers=avg_layers)
+        result, avg_pipeline = train_probe(
+            X_train, y_train, X_test, y_test,
+            pca_variance=args.pca_variance,
+            cv_folds=args.cv_folds,
+            seed=args.seed,
+            layer_label=label,
+        )
+        all_results.append(result)
+        avg_pipelines[label] = avg_pipeline
+        print(f"  {label}: AUC={result.test_auc:.3f} (PCA k={result.n_features_pca})", flush=True)
+
     # 4. Concatenated analysis.
     # All layers stacked into one vector (shape: n × 9*2560 = n × 23040).
     # This is the "best effort" probe — uses maximum information.
@@ -240,6 +266,11 @@ def main() -> None:
     #   proba = probe.predict_proba(X_new)[:, 1]  # pass probability for each sample
     for layer_idx, pipeline in layer_pipelines.items():
         pipeline_path = out_dir / f"probe_layer_{layer_idx}.joblib"
+        joblib.dump(pipeline, pipeline_path)
+        print(f"[probe] Pipeline saved to {pipeline_path}")
+
+    for label, pipeline in avg_pipelines.items():
+        pipeline_path = out_dir / f"probe_{label}.joblib"
         joblib.dump(pipeline, pipeline_path)
         print(f"[probe] Pipeline saved to {pipeline_path}")
 
