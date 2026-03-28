@@ -31,8 +31,10 @@ data = [
     "huggingface_hub",   # Direct file downloads from HuggingFace (LiveCodeBench)
 ]
 probe = [
-    # H2 linear probe training (scripts/train_probe.py).
+    # H2 linear probe training (scripts/train_probe.py)
+    # and trajectory analysis (scripts/analyze_trajectories.py).
     "scikit-learn>=1.4",
+    "matplotlib>=3.8",
 ]
 dev = [
     "pytest>=8.0",
