@@ -36,7 +36,7 @@ from reasoninglab.probing.probe import train_probe
 # ── Configuration ────────────────────────────────────────────────────────────
 # Hardcoded paths and parameters. Change these when running on different data.
 
-RUN_DIR = Path("runs/h2-trajectory-repair_b_20260328_123657")
+RUN_DIR = Path("runs\h2-trajectory-repair_b_20260328_121555")
 LAYER = 35          # Penultimate decoder block — best signal from prior probe analysis
 OUTPUT_DIR = Path("results/h2/trajectory_analysis")
 SEED = 0
