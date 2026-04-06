@@ -36,7 +36,7 @@ from reasoninglab.probing.probe import train_probe
 # ── Configuration ────────────────────────────────────────────────────────────
 # Hardcoded paths and parameters. Change these when running on different data.
 
-RUN_DIR = Path("runs\h2-trajectory-repair_b_20260328_121555")
+RUN_DIR = Path("runs\h2-trajectory-all")
 LAYER = 35          # Penultimate decoder block — best signal from prior probe analysis
 OUTPUT_DIR = Path("results/h2/trajectory_analysis")
 SEED = 0
@@ -58,6 +58,7 @@ class AttemptInfo:
     passed: bool               # did the generated code pass all test cases?
     failure_type: str           # "pass", "syntax", "runtime", "assertion", "timeout"
     completion_tokens: int      # how many tokens the model generated
+    prompt_tokens: int          # how many tokens in the prompt (input to the model)
 
 
 @dataclass
@@ -134,6 +135,7 @@ def load_trajectories(run_dir: Path, layer: int) -> list[TrajectoryRecord]:
                 passed=m_rec["passed"],
                 failure_type=m_rec["failure_type"],
                 completion_tokens=m_rec["completion_tokens"],
+                prompt_tokens=m_rec["prompt_tokens"],
             ))
 
         if not attempts:
@@ -767,6 +769,673 @@ def analysis_5_distance(
     return metrics
 
 
+# ── Analysis 6: Permutation Test on 0->1 Repair Direction ──────────────────
+
+def _collect_transition_deltas(
+    records: list[TrajectoryRecord],
+    trans_idx: int = 0,
+) -> tuple[list[np.ndarray], list[bool]]:
+    """Collect hidden-state deltas for a specific transition step.
+
+    Returns (deltas, labels) where labels[i] = True if the NEXT attempt passed.
+    Only includes transitions where the current attempt FAILED (no repair to
+    analyze if it already passed). Excludes repetition-loop tasks.
+    """
+    deltas: list[np.ndarray] = []
+    labels: list[bool] = []  # True = next attempt passed
+    for rec in records:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) <= trans_idx + 1:
+            continue
+        curr = rec.attempts[trans_idx]
+        nxt = rec.attempts[trans_idx + 1]
+        if curr.passed:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+    return deltas, labels
+
+
+def analysis_6_permutation_test(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Permutation test: is the 0->1 repair direction norm significant?
+
+    Shuffles pass/fail labels 1000 times, recomputes ||mean_success - mean_failure||
+    each time, and checks where the real norm falls in the null distribution.
+    """
+    _section("Analysis 6: Permutation Test (0->1 direction)")
+
+    deltas, labels = _collect_transition_deltas(records, trans_idx=0)
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas)  # shape: (N, hidden_dim)
+    labels_arr = np.array(labels)
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+
+    if n_succ == 0 or n_fail == 0:
+        print("  SKIPPED (need both pass and fail labels)")
+        return {}
+
+    # Real direction norm
+    mean_succ = deltas_arr[labels_arr].mean(axis=0)
+    mean_fail = deltas_arr[~labels_arr].mean(axis=0)
+    real_norm = float(np.linalg.norm(mean_succ - mean_fail))
+    print(f"  N_success={n_succ}  N_failure={n_fail}")
+    print(f"  Real direction norm: {real_norm:.2f}")
+
+    # Permutation null distribution
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels_arr)
+        ms = deltas_arr[shuffled].mean(axis=0)
+        mf = deltas_arr[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+
+    p_value = float((perm_norms >= real_norm).mean())
+    print(f"  Permutation norms: mean={perm_norms.mean():.2f}  "
+          f"std={perm_norms.std():.2f}  max={perm_norms.max():.2f}")
+    print(f"  p-value: {p_value:.4f}  "
+          f"({'significant' if p_value < 0.05 else 'NOT significant'} at alpha=0.05)")
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7, label="Permuted norms")
+    ax.axvline(real_norm, color="#e74c3c", linewidth=2,
+               label=f"Real norm = {real_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure||")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Permutation Test: 0->1 Repair Direction (n={len(deltas)}, "
+                 f"p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "permutation_test_0to1.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'permutation_test_0to1.png'}")
+
+    return {
+        "real_norm": real_norm,
+        "perm_mean": float(perm_norms.mean()),
+        "perm_std": float(perm_norms.std()),
+        "perm_max": float(perm_norms.max()),
+        "p_value": p_value,
+        "n_permutations": n_perms,
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
+# ── Analysis 7: PCA Reduction Helper ──────────────────────────────────────
+
+def _build_pca_reduced_records(
+    records: list[TrajectoryRecord],
+    n_components: int = 100,
+) -> tuple[list[TrajectoryRecord], PCA]:
+    """Fit PCA on attempt-0 states only, transform all attempts.
+
+    This factors out within-attempt variance by defining the coordinate system
+    from the initial prompt states. Attempt-1+ states are projected INTO this
+    space, so any movement we see is real geometric shift, not an artifact of
+    PCA fitting on mixed-context data.
+
+    Returns (records_pca, pca_object).
+    """
+    _section("PCA Reduction: fit on attempt-0, transform all")
+
+    X_att0 = np.stack([r.attempts[0].hidden_state for r in records]).astype(np.float32)
+
+    pca = PCA(n_components=n_components, random_state=SEED)
+    pca.fit(X_att0)
+
+    var_total = float(pca.explained_variance_ratio_.sum())
+    print(f"  Fitted on {len(X_att0)} attempt-0 states")
+    print(f"  {n_components} components capture {var_total:.1%} of attempt-0 variance")
+
+    new_records: list[TrajectoryRecord] = []
+    for rec in records:
+        new_attempts: list[AttemptInfo] = []
+        for att in rec.attempts:
+            reduced = pca.transform(att.hidden_state.reshape(1, -1).astype(np.float32))[0]
+            new_attempts.append(AttemptInfo(
+                attempt_idx=att.attempt_idx,
+                hidden_state=reduced,
+                passed=att.passed,
+                failure_type=att.failure_type,
+                completion_tokens=att.completion_tokens,
+                prompt_tokens=att.prompt_tokens,
+            ))
+        new_records.append(TrajectoryRecord(
+            task_id=rec.task_id,
+            attempts=new_attempts,
+            eventually_passes=rec.eventually_passes,
+            is_repetition_loop=rec.is_repetition_loop,
+        ))
+
+    return new_records, pca
+
+
+# ── Analysis 8: Direction in PCA-Reduced Space ────────────────────────────
+
+def analysis_8_direction_pca(records_pca: list[TrajectoryRecord]) -> dict:
+    """Redo Analysis 2 (RepE direction) in PCA-reduced space.
+
+    If the repair-success direction survives PCA reduction (fitted on attempt-0
+    states), it's encoding repair quality, not prompt structure.
+    """
+    _section("Analysis 8: Direction in PCA-Reduced Space")
+
+    per_transition: dict[int, list[tuple[np.ndarray, bool]]] = defaultdict(list)
+    for rec in records_pca:
+        if rec.is_repetition_loop:
+            continue
+        for i in range(len(rec.attempts) - 1):
+            curr = rec.attempts[i]
+            nxt = rec.attempts[i + 1]
+            if curr.passed:
+                continue
+            delta = nxt.hidden_state - curr.hidden_state
+            per_transition[curr.attempt_idx].append((delta, nxt.passed))
+
+    print("  Per-transition (PCA-reduced):")
+    print(f"  {'Trans':<8} {'N_succ':>6} {'N_fail':>6} {'Dir norm':>9}")
+    print("  " + "-" * 35)
+
+    transition_directions: dict[int, np.ndarray] = {}
+    metrics: dict = {"per_transition": {}, "pooled": {}}
+
+    for trans_idx in sorted(per_transition):
+        items = per_transition[trans_idx]
+        succ_deltas = [d for d, p in items if p]
+        fail_deltas = [d for d, p in items if not p]
+
+        if not succ_deltas or not fail_deltas:
+            print(f"  {trans_idx}->{trans_idx+1}  {len(succ_deltas):>6} "
+                  f"{len(fail_deltas):>6}  SKIPPED")
+            continue
+
+        mean_succ = np.mean(succ_deltas, axis=0)
+        mean_fail = np.mean(fail_deltas, axis=0)
+        direction = mean_succ - mean_fail
+        norm = float(np.linalg.norm(direction))
+        transition_directions[trans_idx] = direction
+
+        metrics["per_transition"][f"{trans_idx}->{trans_idx+1}"] = {
+            "n_success": len(succ_deltas),
+            "n_failure": len(fail_deltas),
+            "direction_norm": norm,
+        }
+        print(f"  {trans_idx}->{trans_idx+1}  {len(succ_deltas):>6} "
+              f"{len(fail_deltas):>6}  {norm:>9.2f}")
+
+    # Consistency check
+    dir_keys = sorted(transition_directions)
+    if len(dir_keys) >= 2:
+        print()
+        print("  Consistency (cosine sim between PCA-reduced directions):")
+        for i in range(len(dir_keys)):
+            for j in range(i + 1, len(dir_keys)):
+                cos = _cosine_sim(
+                    transition_directions[dir_keys[i]],
+                    transition_directions[dir_keys[j]],
+                )
+                label = f"  {dir_keys[i]}->{dir_keys[i]+1} vs {dir_keys[j]}->{dir_keys[j]+1}"
+                print(f"  {label}: cos={cos:.3f}")
+                metrics["per_transition"][f"cos_{dir_keys[i]}v{dir_keys[j]}"] = cos
+
+    # Pooled direction
+    print()
+    print("  Pooled direction (PCA-reduced):")
+    all_succ = [d for items in per_transition.values() for d, p in items if p]
+    all_fail = [d for items in per_transition.values() for d, p in items if not p]
+
+    dim = records_pca[0].attempts[0].hidden_state.shape[0]
+    repair_direction = np.zeros(dim)
+    if all_succ and all_fail:
+        mean_succ = np.mean(all_succ, axis=0)
+        mean_fail = np.mean(all_fail, axis=0)
+        repair_direction = mean_succ - mean_fail
+        norm = float(np.linalg.norm(repair_direction))
+        print(f"  N_success={len(all_succ)}  N_failure={len(all_fail)}  "
+              f"Direction norm={norm:.2f}")
+        metrics["pooled"] = {
+            "n_success": len(all_succ),
+            "n_failure": len(all_fail),
+            "direction_norm": norm,
+        }
+    else:
+        print("  SKIPPED (need both success and failure deltas)")
+
+    metrics["_repair_direction"] = repair_direction
+    return metrics
+
+
+# ── Analysis 9: Convergence in PCA-Reduced Space ─────────────────────────
+
+def analysis_9_convergence_pca(
+    records_pca: list[TrajectoryRecord],
+    repair_direction_pca: np.ndarray,
+) -> dict:
+    """Redo Analysis 3 (convergence) in PCA-reduced space."""
+    _section("Analysis 9: Convergence in PCA-Reduced Space")
+
+    long_records = [r for r in records_pca
+                    if len(r.attempts) >= 3 and not r.is_repetition_loop]
+    print(f"  Tasks with 3+ attempts (excl. loops): {len(long_records)}")
+
+    if not long_records:
+        print("  SKIPPED (no qualifying tasks)")
+        return {}
+
+    pass_recs = [r for r in long_records if r.eventually_passes]
+    fail_recs = [r for r in long_records if not r.eventually_passes]
+    print(f"  Eventually pass: {len(pass_recs)}  Never pass: {len(fail_recs)}")
+
+    metrics: dict = {}
+
+    # A) Directional consistency
+    for label, group in [("pass", pass_recs), ("fail", fail_recs)]:
+        cos_sims: list[float] = []
+        for rec in group:
+            deltas = [
+                rec.attempts[i + 1].hidden_state - rec.attempts[i].hidden_state
+                for i in range(len(rec.attempts) - 1)
+            ]
+            for j in range(len(deltas) - 1):
+                cos_sims.append(_cosine_sim(deltas[j], deltas[j + 1]))
+
+        if cos_sims:
+            mean_cos = float(np.mean(cos_sims))
+            std_cos = float(np.std(cos_sims))
+            metrics[f"consistency_{label}"] = {
+                "mean": mean_cos, "std": std_cos, "n": len(cos_sims),
+            }
+            print(f"  Directional consistency ({label}): "
+                  f"cos={mean_cos:.3f} +/- {std_cos:.3f} (n={len(cos_sims)})")
+
+    # B) Projection onto PCA-reduced repair direction
+    dir_norm = np.linalg.norm(repair_direction_pca)
+    if dir_norm > 0:
+        unit_dir = repair_direction_pca / dir_norm
+        print()
+        print("  Projection of deltas onto PCA repair direction (by step):")
+        print(f"  {'Step':<8} {'Pass proj':>10} {'Fail proj':>10}")
+        print("  " + "-" * 30)
+
+        max_steps = max(len(r.attempts) for r in long_records) - 1
+        for step in range(max_steps):
+            pass_projs: list[float] = []
+            fail_projs: list[float] = []
+            for rec in long_records:
+                if step + 1 >= len(rec.attempts):
+                    continue
+                delta = (rec.attempts[step + 1].hidden_state
+                         - rec.attempts[step].hidden_state)
+                proj = float(np.dot(delta, unit_dir))
+                if rec.eventually_passes:
+                    pass_projs.append(proj)
+                else:
+                    fail_projs.append(proj)
+
+            pass_mean = f"{np.mean(pass_projs):.2f}" if pass_projs else "n/a"
+            fail_mean = f"{np.mean(fail_projs):.2f}" if fail_projs else "n/a"
+            print(f"  {step}->{step+1}    {pass_mean:>10} {fail_mean:>10}")
+            metrics[f"proj_step_{step}"] = {
+                "pass_mean": float(np.mean(pass_projs)) if pass_projs else None,
+                "fail_mean": float(np.mean(fail_projs)) if fail_projs else None,
+                "pass_n": len(pass_projs),
+                "fail_n": len(fail_projs),
+            }
+
+    return metrics
+
+
+# ── Analysis 10: Distance to Success (PCA, first-pass centroid) ───────────
+
+def analysis_10_distance_pca(
+    records_pca: list[TrajectoryRecord],
+    output_dir: Path,
+) -> dict:
+    """Distance-to-success in PCA-reduced space with improved centroid.
+
+    Centroid is computed from the hidden state at the FIRST passing attempt
+    for each task (not just attempt-0 passes). This captures "the model state
+    when it finally understood the fix."
+    """
+    _section("Analysis 10: Distance to Success (PCA, first-pass centroid)")
+
+    # Collect hidden state at the FIRST passing attempt for each passing task
+    first_pass_vectors: list[np.ndarray] = []
+    for rec in records_pca:
+        if rec.eventually_passes:
+            for att in rec.attempts:
+                if att.passed:
+                    first_pass_vectors.append(att.hidden_state)
+                    break
+
+    if not first_pass_vectors:
+        print("  SKIPPED (no passing tasks)")
+        return {}
+
+    centroid = np.mean(first_pass_vectors, axis=0)
+    print(f"  First-pass centroid from {len(first_pass_vectors)} tasks")
+
+    max_attempts = max(len(r.attempts) for r in records_pca)
+
+    pass_curves: list[list[float]] = []
+    fail_curves: list[list[float]] = []
+    loop_curves: list[list[float]] = []
+
+    for rec in records_pca:
+        distances = [
+            float(np.linalg.norm(att.hidden_state - centroid))
+            for att in rec.attempts
+        ]
+        if rec.is_repetition_loop:
+            loop_curves.append(distances)
+        elif rec.eventually_passes:
+            pass_curves.append(distances)
+        else:
+            fail_curves.append(distances)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for label, curves, color in [
+        ("Eventually passes", pass_curves, "#2ecc71"),
+        ("Never passes", fail_curves, "#e74c3c"),
+        ("Repetition loops", loop_curves, "#95a5a6"),
+    ]:
+        if not curves:
+            continue
+        padded = np.full((len(curves), max_attempts), np.nan)
+        for i, c in enumerate(curves):
+            padded[i, :len(c)] = c
+        mean = np.nanmean(padded, axis=0)
+        std = np.nanstd(padded, axis=0)
+        steps = np.arange(max_attempts)
+        ax.plot(steps, mean, color=color, label=label, linewidth=2)
+        ax.fill_between(steps, mean - std, mean + std, color=color, alpha=0.2)
+
+    ax.set_xlabel("Attempt index")
+    ax.set_ylabel("Euclidean distance to first-pass centroid (PCA)")
+    ax.set_title(f"Distance to Success Region - PCA-reduced (layer {LAYER})")
+    ax.legend()
+    ax.set_xticks(range(max_attempts))
+    plt.tight_layout()
+    fig.savefig(output_dir / "distance_to_success_pca.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'distance_to_success_pca.png'}")
+
+    # Table
+    metrics: dict = {}
+    print()
+    print(f"  {'Step':<6} {'Pass dist':>10} {'Fail dist':>10} {'Loop dist':>10}")
+    print("  " + "-" * 38)
+    for step in range(max_attempts):
+        p_dists = [c[step] for c in pass_curves if step < len(c)]
+        f_dists = [c[step] for c in fail_curves if step < len(c)]
+        l_dists = [c[step] for c in loop_curves if step < len(c)]
+        p_mean = float(np.mean(p_dists)) if p_dists else float("nan")
+        f_mean = float(np.mean(f_dists)) if f_dists else float("nan")
+        l_mean = float(np.mean(l_dists)) if l_dists else float("nan")
+        print(f"  {step:<6} {p_mean:>10.1f} {f_mean:>10.1f} {l_mean:>10.1f}")
+        metrics[f"step_{step}"] = {
+            "pass_mean_dist": p_mean if p_dists else None,
+            "fail_mean_dist": f_mean if f_dists else None,
+            "loop_mean_dist": l_mean if l_dists else None,
+            "pass_n": len(p_dists), "fail_n": len(f_dists), "loop_n": len(l_dists),
+        }
+
+    return metrics
+
+
+# ── Analysis 11: Per-Task Projection Histogram ────────────────────────────
+
+def analysis_11_projection_histogram(
+    records: list[TrajectoryRecord],
+    repair_direction: np.ndarray,
+    output_dir: Path,
+) -> dict:
+    """Histogram of 0->1 delta projections onto the repair direction.
+
+    Shows whether pass and fail deltas are well-separated or heavily overlapping
+    when projected onto the contrastive direction from Analysis 2.
+    """
+    _section("Analysis 11: Projection Histogram (0->1)")
+
+    dir_norm = np.linalg.norm(repair_direction)
+    if dir_norm == 0:
+        print("  SKIPPED (repair direction is zero)")
+        return {}
+    unit_dir = repair_direction / dir_norm
+
+    deltas, labels = _collect_transition_deltas(records, trans_idx=0)
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    pass_projs: list[float] = []
+    fail_projs: list[float] = []
+    for d, passed in zip(deltas, labels):
+        proj = float(np.dot(d, unit_dir))
+        if passed:
+            pass_projs.append(proj)
+        else:
+            fail_projs.append(proj)
+
+    if not pass_projs or not fail_projs:
+        print("  SKIPPED (need both pass and fail projections)")
+        return {}
+
+    # Cohen's d
+    pass_arr = np.array(pass_projs)
+    fail_arr = np.array(fail_projs)
+    pooled_std = np.sqrt(
+        ((len(pass_arr) - 1) * pass_arr.std(ddof=1)**2
+         + (len(fail_arr) - 1) * fail_arr.std(ddof=1)**2)
+        / (len(pass_arr) + len(fail_arr) - 2)
+    )
+    cohens_d = float((pass_arr.mean() - fail_arr.mean()) / pooled_std) if pooled_std > 0 else 0.0
+
+    print(f"  Pass projections: mean={pass_arr.mean():.2f}  std={pass_arr.std():.2f}  n={len(pass_arr)}")
+    print(f"  Fail projections: mean={fail_arr.mean():.2f}  std={fail_arr.std():.2f}  n={len(fail_arr)}")
+    print(f"  Cohen's d: {cohens_d:.3f}")
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bins = np.linspace(
+        min(pass_arr.min(), fail_arr.min()),
+        max(pass_arr.max(), fail_arr.max()),
+        40,
+    )
+    ax.hist(fail_projs, bins=bins, color="#e74c3c", alpha=0.6, label=f"Fail (n={len(fail_arr)})")
+    ax.hist(pass_projs, bins=bins, color="#2ecc71", alpha=0.6, label=f"Pass (n={len(pass_arr)})")
+    ax.axvline(0, color="gray", linestyle="--", linewidth=0.5)
+    ax.set_xlabel("Projection onto repair direction")
+    ax.set_ylabel("Count")
+    ax.set_title(f"0->1 Delta Projections (Cohen's d = {cohens_d:.2f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "projection_histogram_0to1.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'projection_histogram_0to1.png'}")
+
+    return {
+        "pass_mean": float(pass_arr.mean()),
+        "pass_std": float(pass_arr.std()),
+        "fail_mean": float(fail_arr.mean()),
+        "fail_std": float(fail_arr.std()),
+        "cohens_d": cohens_d,
+        "n_pass": len(pass_arr),
+        "n_fail": len(fail_arr),
+    }
+
+
+# ── Analysis 12: Focused PCA Plot (Attempt 0 vs 1) ───────────────────────
+
+def analysis_12_focused_pca(
+    records: list[TrajectoryRecord],
+    output_dir: Path,
+) -> dict:
+    """PCA plot of just attempt-0 and attempt-1, colored by attempt-1 outcome.
+
+    PCA is fitted on attempt-0 states only (same philosophy as Analysis 7).
+    Arrows show the 0->1 transition direction for each task.
+    """
+    _section("Analysis 12: Focused PCA (attempt 0 vs 1)")
+
+    # Collect tasks with 2+ attempts, excluding repetition loops
+    tasks: list[tuple[np.ndarray, np.ndarray, bool]] = []  # (h0, h1, att1_passed)
+    for rec in records:
+        if rec.is_repetition_loop or len(rec.attempts) < 2:
+            continue
+        h0 = rec.attempts[0].hidden_state
+        h1 = rec.attempts[1].hidden_state
+        tasks.append((h0, h1, rec.attempts[1].passed))
+
+    if len(tasks) < 5:
+        print(f"  SKIPPED (only {len(tasks)} qualifying tasks)")
+        return {}
+
+    h0_all = np.stack([t[0] for t in tasks]).astype(np.float32)
+    h1_all = np.stack([t[1] for t in tasks]).astype(np.float32)
+    att1_passed = [t[2] for t in tasks]
+
+    # PCA fitted on attempt-0 only
+    pca = PCA(n_components=2, random_state=SEED)
+    pca.fit(h0_all)
+
+    h0_2d = pca.transform(h0_all)
+    h1_2d = pca.transform(h1_all)
+
+    var = pca.explained_variance_ratio_
+    print(f"  PCA (fitted on attempt-0): PC1={var[0]:.1%}  PC2={var[1]:.1%}")
+    print(f"  Tasks plotted: {len(tasks)} "
+          f"(attempt-1 pass: {sum(att1_passed)}, fail: {sum(not p for p in att1_passed)})")
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    for i in range(len(tasks)):
+        color = "#2ecc71" if att1_passed[i] else "#e74c3c"
+        alpha = 0.7 if att1_passed[i] else 0.4
+
+        # Attempt-0: circle
+        ax.scatter(h0_2d[i, 0], h0_2d[i, 1], c=color, marker="o",
+                   s=30, alpha=alpha, zorder=2, edgecolors="white", linewidths=0.5)
+        # Attempt-1: triangle
+        ax.scatter(h1_2d[i, 0], h1_2d[i, 1], c=color, marker="^",
+                   s=30, alpha=alpha, zorder=2, edgecolors="white", linewidths=0.5)
+        # Arrow
+        ax.annotate("", xy=(h1_2d[i, 0], h1_2d[i, 1]),
+                    xytext=(h0_2d[i, 0], h0_2d[i, 1]),
+                    arrowprops=dict(arrowstyle="->", color=color, alpha=alpha * 0.6,
+                                    linewidth=0.8))
+
+    ax.set_xlabel(f"PC1 ({var[0]:.1%} variance)")
+    ax.set_ylabel(f"PC2 ({var[1]:.1%} variance)")
+    ax.set_title(f"Attempt 0 -> 1 Transitions (PCA on attempt-0, layer {LAYER})")
+
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker="o", color="gray", label="Attempt 0", markersize=6,
+               linestyle="None"),
+        Line2D([0], [0], marker="^", color="gray", label="Attempt 1", markersize=6,
+               linestyle="None"),
+        Line2D([0], [0], color="#2ecc71", label="Attempt 1 passes", linewidth=2),
+        Line2D([0], [0], color="#e74c3c", label="Attempt 1 fails", linewidth=2),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right")
+    plt.tight_layout()
+    fig.savefig(output_dir / "focused_pca_0vs1.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'focused_pca_0vs1.png'}")
+
+    return {
+        "pc1_variance": float(var[0]),
+        "pc2_variance": float(var[1]),
+        "n_tasks": len(tasks),
+        "n_att1_pass": sum(att1_passed),
+        "n_att1_fail": sum(not p for p in att1_passed),
+    }
+
+
+# ── Analysis 13: Prompt-Length Correlation Check ──────────────────────────
+
+def analysis_13_prompt_correlation(
+    records: list[TrajectoryRecord],
+    output_dir: Path,
+) -> dict:
+    """Check if PCA axes correlate with prompt_tokens (prompt-structure confound).
+
+    Fits PCA on ALL attempts (same as Analysis 4), then computes Pearson
+    correlation between PC1/PC2 and prompt_tokens. High |r| means that PC axis
+    is mostly encoding prompt length — a proxy for attempt index.
+    """
+    _section("Analysis 13: Prompt-Length Correlation")
+
+    all_vectors: list[np.ndarray] = []
+    all_prompt_tokens: list[int] = []
+    for rec in records:
+        for att in rec.attempts:
+            all_vectors.append(att.hidden_state)
+            all_prompt_tokens.append(att.prompt_tokens)
+
+    X = np.stack(all_vectors).astype(np.float32)
+    prompt_tokens = np.array(all_prompt_tokens, dtype=np.float64)
+
+    pca = PCA(n_components=2, random_state=SEED)
+    X_2d = pca.fit_transform(X)
+
+    var = pca.explained_variance_ratio_
+
+    # Pearson correlation
+    from scipy import stats
+    r_pc1, p_pc1 = stats.pearsonr(X_2d[:, 0], prompt_tokens)
+    r_pc2, p_pc2 = stats.pearsonr(X_2d[:, 1], prompt_tokens)
+
+    print(f"  PCA variance: PC1={var[0]:.1%}  PC2={var[1]:.1%}")
+    print(f"  Pearson r(PC1, prompt_tokens) = {r_pc1:.3f}  (p={p_pc1:.2e})")
+    print(f"  Pearson r(PC2, prompt_tokens) = {r_pc2:.3f}  (p={p_pc2:.2e})")
+
+    confound_pc1 = "YES - prompt structure" if abs(r_pc1) > 0.7 else "no"
+    confound_pc2 = "YES - prompt structure" if abs(r_pc2) > 0.7 else "no"
+    print(f"  PC1 confound: {confound_pc1}")
+    print(f"  PC2 confound: {confound_pc2}")
+
+    # Scatter plot
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    for ax, pc_idx, r_val, p_val in [
+        (axes[0], 0, r_pc1, p_pc1),
+        (axes[1], 1, r_pc2, p_pc2),
+    ]:
+        ax.scatter(prompt_tokens, X_2d[:, pc_idx], s=8, alpha=0.3, c="#3498db")
+        ax.set_xlabel("prompt_tokens")
+        ax.set_ylabel(f"PC{pc_idx+1} ({var[pc_idx]:.1%} var)")
+        ax.set_title(f"PC{pc_idx+1} vs prompt_tokens (r={r_val:.3f}, p={p_val:.1e})")
+
+    plt.tight_layout()
+    fig.savefig(output_dir / "pc_vs_prompt_tokens.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'pc_vs_prompt_tokens.png'}")
+
+    return {
+        "pc1_variance": float(var[0]),
+        "pc2_variance": float(var[1]),
+        "r_pc1_prompt": float(r_pc1),
+        "p_pc1_prompt": float(p_pc1),
+        "r_pc2_prompt": float(r_pc2),
+        "p_pc2_prompt": float(p_pc2),
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _make_serializable(obj: object) -> object:
@@ -825,6 +1494,40 @@ def main() -> None:
 
     # ---- Analysis 5: distance separates loops into their own curve ----
     all_metrics["distance"] = analysis_5_distance(records, OUTPUT_DIR)
+
+    # ---- Analysis 6: permutation test on 0->1 direction ----
+    all_metrics["permutation_test"] = analysis_6_permutation_test(
+        records, SEED, OUTPUT_DIR)
+
+    # ---- PCA reduction: fit on attempt-0, transform all (foundation for 8-10) ----
+    records_pca, _pca_obj = _build_pca_reduced_records(records, n_components=100)
+
+    # ---- Analysis 8: direction in PCA-reduced space ----
+    dir_pca_metrics = analysis_8_direction_pca(records_pca)
+    repair_dir_pca = dir_pca_metrics.pop(
+        "_repair_direction",
+        np.zeros(records_pca[0].attempts[0].hidden_state.shape[0]),
+    )
+    all_metrics["direction_pca"] = dir_pca_metrics
+
+    # ---- Analysis 9: convergence in PCA-reduced space ----
+    all_metrics["convergence_pca"] = analysis_9_convergence_pca(
+        records_pca, repair_dir_pca)
+
+    # ---- Analysis 10: distance with first-pass centroid in PCA space ----
+    all_metrics["distance_pca"] = analysis_10_distance_pca(
+        records_pca, OUTPUT_DIR)
+
+    # ---- Analysis 11: projection histogram (0->1 deltas) ----
+    all_metrics["projection_histogram"] = analysis_11_projection_histogram(
+        records, repair_direction, OUTPUT_DIR)
+
+    # ---- Analysis 12: focused PCA (attempt 0 vs 1) ----
+    all_metrics["focused_pca"] = analysis_12_focused_pca(records, OUTPUT_DIR)
+
+    # ---- Analysis 13: prompt-length correlation check ----
+    all_metrics["prompt_correlation"] = analysis_13_prompt_correlation(
+        records, OUTPUT_DIR)
 
     # ---- Save all numerical metrics to JSON ----
     metrics_path = OUTPUT_DIR / "metrics.json"

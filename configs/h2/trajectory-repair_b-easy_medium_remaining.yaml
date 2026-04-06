@@ -1,4 +1,4 @@
-experiment_id: h2-trajectory-repair_b-easy_medium
+experiment_id: h2-trajectory-repair_b-easy_medium_remaining
 hypothesis: H2
 policy: repair_b
 seed: 0
@@ -21,6 +21,6 @@ runtime:
   return_hidden_states: true
 
 paths:
-  tasks_file: data/lcb_easy_medium_for_trajectory.jsonl
+  tasks_file: data/lcb_easy_medium_remaining.jsonl
   runs_root: runs
   results_root: results/h2
