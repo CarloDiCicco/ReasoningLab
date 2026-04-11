@@ -20,6 +20,7 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,7 @@ class ProbeSample:
     source: str  # "HumanEval" | "LCB"
     layer_vectors: dict[int, np.ndarray]  # layer_idx → (hidden_dim,)
     passed: bool
+    prompt_tokens: int = 0  # number of tokens in the prompt; 0 if unknown
 
 
 # Regex to parse .npz keys like "attempt_0_layer_29".
@@ -91,6 +93,17 @@ def load_samples(hidden_states_dir: Path) -> list[ProbeSample]:
     if not npz_files:
         return samples
 
+    # Try to load prompt_tokens from attempts.jsonl (sibling of hidden_states dir).
+    # Maps task_id -> prompt_tokens for attempt_0.
+    prompt_tokens_map: dict[str, int] = {}
+    attempts_jsonl = hidden_states_dir.parent / "attempts.jsonl"
+    if attempts_jsonl.exists():
+        with open(attempts_jsonl, encoding="utf-8") as f:
+            for line in f:
+                rec = json.loads(line)
+                if rec.get("attempt_idx", 0) == 0 and "prompt_tokens" in rec:
+                    prompt_tokens_map[rec["task_id"]] = rec["prompt_tokens"]
+
     for npz_path in npz_files:
         data = np.load(npz_path)  # lazy-loads, no full array copy yet
 
@@ -120,6 +133,7 @@ def load_samples(hidden_states_dir: Path) -> list[ProbeSample]:
                 source=_source_from_task_id(task_id),
                 layer_vectors=layer_vectors,
                 passed=bool(data[passed_key]),
+                prompt_tokens=prompt_tokens_map.get(task_id, 0),
             )
         )
 

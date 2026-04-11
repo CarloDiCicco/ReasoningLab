@@ -27,7 +27,8 @@ matplotlib.use("Agg")  # non-interactive backend — we save PNGs, no GUI needed
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 
 from reasoninglab.probing.data import _task_id_from_filename
 from reasoninglab.probing.probe import train_probe
@@ -358,6 +359,8 @@ def analysis_2_direction(records: list[TrajectoryRecord]) -> dict:
 
             # Only compute delta for failed attempts that lead to a repair
             if curr.passed:
+                continue
+            if curr.completion_tokens == TOKEN_LIMIT:
                 continue
 
             # delta = how the hidden state changed after receiving error feedback
@@ -779,7 +782,9 @@ def _collect_transition_deltas(
 
     Returns (deltas, labels) where labels[i] = True if the NEXT attempt passed.
     Only includes transitions where the current attempt FAILED (no repair to
-    analyze if it already passed). Excludes repetition-loop tasks.
+    analyze if it already passed). Excludes repetition-loop tasks and tasks
+    where the current attempt hit the token limit (768), which flood the
+    repair prompt with truncated code and distort delta_prompt_tokens.
     """
     deltas: list[np.ndarray] = []
     labels: list[bool] = []  # True = next attempt passed
@@ -791,6 +796,8 @@ def _collect_transition_deltas(
         curr = rec.attempts[trans_idx]
         nxt = rec.attempts[trans_idx + 1]
         if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
             continue
         deltas.append(nxt.hidden_state - curr.hidden_state)
         labels.append(nxt.passed)
@@ -940,6 +947,8 @@ def analysis_8_direction_pca(records_pca: list[TrajectoryRecord]) -> dict:
             curr = rec.attempts[i]
             nxt = rec.attempts[i + 1]
             if curr.passed:
+                continue
+            if curr.completion_tokens == TOKEN_LIMIT:
                 continue
             delta = nxt.hidden_state - curr.hidden_state
             per_transition[curr.attempt_idx].append((delta, nxt.passed))
@@ -1436,6 +1445,737 @@ def analysis_13_prompt_correlation(
     }
 
 
+# ── Analysis 14: Residualized Probe ─────────────────────────────────────────
+
+def analysis_14_residualized_probe(
+    records: list[TrajectoryRecord],
+    seed: int,
+) -> dict:
+    """Train probe on hidden states with prompt_tokens regressed out.
+
+    Compares three probes on attempt-0 data:
+      1. Raw (unchanged) - baseline
+      2. Residualized - prompt_tokens linearly removed from each dimension
+      3. Prompt-only - just prompt_tokens as the single feature (floor)
+
+    Residualization is fit on the train split only and applied to both sets.
+    """
+    _section("Analysis 14: Residualized Probe (prompt-length control)")
+
+    # Collect attempt-0 data
+    X_list, y_list, pt_list = [], [], []
+    for rec in records:
+        att0 = rec.attempts[0]
+        X_list.append(att0.hidden_state)
+        y_list.append(int(att0.passed))
+        pt_list.append(att0.prompt_tokens)
+
+    X = np.stack(X_list).astype(np.float32)
+    y = np.array(y_list, dtype=np.int32)
+    pt = np.array(pt_list, dtype=np.float32)
+
+    # Train/test split (same as Analysis 1)
+    idx = np.arange(len(y))
+    train_idx, test_idx = train_test_split(
+        idx, test_size=0.2, stratify=y, random_state=seed)
+
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+    pt_train, pt_test = pt[train_idx], pt[test_idx]
+
+    # 1. Raw probe
+    raw_result, _ = train_probe(
+        X_train, y_train, X_test, y_test,
+        pca_variance=0.95, cv_folds=5, seed=seed, layer_label="raw")
+    print(f"  Raw probe:          AUC={raw_result.test_auc:.3f}  "
+          f"CV={raw_result.cv_auc_mean:.3f}")
+
+    # 2. Residualized probe
+    reg = LinearRegression()
+    reg.fit(pt_train.reshape(-1, 1), X_train)
+    X_train_r = (X_train - reg.predict(pt_train.reshape(-1, 1))).astype(np.float32)
+    X_test_r = (X_test - reg.predict(pt_test.reshape(-1, 1))).astype(np.float32)
+
+    resid_result, _ = train_probe(
+        X_train_r, y_train, X_test_r, y_test,
+        pca_variance=0.95, cv_folds=5, seed=seed, layer_label="residualized")
+    print(f"  Residualized probe: AUC={resid_result.test_auc:.3f}  "
+          f"CV={resid_result.cv_auc_mean:.3f}")
+
+    # 3. Prompt-only probe
+    prompt_result, _ = train_probe(
+        pt_train.reshape(-1, 1), y_train,
+        pt_test.reshape(-1, 1), y_test,
+        pca_variance=0.99, cv_folds=5, seed=seed, layer_label="prompt_only")
+    print(f"  Prompt-only probe:  AUC={prompt_result.test_auc:.3f}  "
+          f"CV={prompt_result.cv_auc_mean:.3f}")
+
+    auc_drop = raw_result.test_auc - resid_result.test_auc
+    print(f"  AUC drop from residualization: {auc_drop:+.3f}")
+    print(f"  Signal above prompt-only: "
+          f"{resid_result.test_auc - prompt_result.test_auc:+.3f}")
+
+    return {
+        "raw_auc": float(raw_result.test_auc),
+        "raw_cv_auc": float(raw_result.cv_auc_mean),
+        "residualized_auc": float(resid_result.test_auc),
+        "residualized_cv_auc": float(resid_result.cv_auc_mean),
+        "prompt_only_auc": float(prompt_result.test_auc),
+        "prompt_only_cv_auc": float(prompt_result.cv_auc_mean),
+        "auc_drop": float(auc_drop),
+        "n_train": len(train_idx),
+        "n_test": len(test_idx),
+    }
+
+
+# ── Analysis 15: Direction Residualized Against delta_prompt_tokens ─────────
+
+def analysis_15_direction_residualized(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Residualize 0->1 deltas against delta_prompt_tokens, then recompute direction.
+
+    If the repair direction is just encoding prompt-token growth, residualization
+    kills it. If real, it survives. Also runs a permutation test on residualized
+    deltas.
+    """
+    _section("Analysis 15: Direction Residualized (prompt-length control)")
+
+    # Collect 0->1 deltas WITH delta_prompt_tokens
+    deltas, labels, delta_pts = [], [], []
+    for rec in records:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) < 2:
+            continue
+        curr, nxt = rec.attempts[0], rec.attempts[1]
+        if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+        delta_pts.append(nxt.prompt_tokens - curr.prompt_tokens)
+
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+    delta_pts_arr = np.array(delta_pts, dtype=np.float32)
+
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+    print(f"  N_success={n_succ}  N_failure={n_fail}")
+
+    # Raw direction norm (for comparison)
+    mean_s = deltas_arr[labels_arr].mean(axis=0)
+    mean_f = deltas_arr[~labels_arr].mean(axis=0)
+    raw_norm = float(np.linalg.norm(mean_s - mean_f))
+    print(f"  Raw direction norm: {raw_norm:.2f}")
+
+    # Residualize each dimension against delta_prompt_tokens
+    reg = LinearRegression()
+    reg.fit(delta_pts_arr.reshape(-1, 1), deltas_arr)
+    deltas_resid = (deltas_arr - reg.predict(delta_pts_arr.reshape(-1, 1))).astype(np.float32)
+
+    mean_s_r = deltas_resid[labels_arr].mean(axis=0)
+    mean_f_r = deltas_resid[~labels_arr].mean(axis=0)
+    resid_norm = float(np.linalg.norm(mean_s_r - mean_f_r))
+    print(f"  Residualized direction norm: {resid_norm:.2f}")
+    print(f"  Norm retention: {resid_norm / raw_norm:.1%}")
+
+    # Permutation test on residualized deltas
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels_arr)
+        ms = deltas_resid[shuffled].mean(axis=0)
+        mf = deltas_resid[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+
+    p_value = float((perm_norms >= resid_norm).mean())
+    print(f"  Permutation test (residualized): p={p_value:.4f}  "
+          f"null mean={perm_norms.mean():.2f}  null std={perm_norms.std():.2f}")
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7, label="Permuted (residualized)")
+    ax.axvline(resid_norm, color="#e74c3c", linewidth=2,
+               label=f"Real norm = {resid_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure|| (residualized)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Permutation Test: Residualized 0->1 Direction (p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "direction_residualized_permtest.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'direction_residualized_permtest.png'}")
+
+    return {
+        "raw_norm": raw_norm,
+        "residualized_norm": resid_norm,
+        "norm_retention": resid_norm / raw_norm,
+        "p_value": p_value,
+        "perm_mean": float(perm_norms.mean()),
+        "perm_std": float(perm_norms.std()),
+        "n_success": n_succ,
+        "n_failure": n_fail,
+        "n_permutations": n_perms,
+    }
+
+
+# ── Analysis 16: Split-Half Stability Test ──────────────────────────────────
+
+def analysis_16_split_half_stability(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Test whether the repair direction's inclination is stable across data splits.
+
+    Splits 0->1 deltas into halves A/B (stratified by label), computes the
+    direction on each half, measures cosine similarity. Repeats 1000 times.
+    Compares to a null distribution where labels are shuffled before splitting.
+    """
+    _section("Analysis 16: Split-Half Stability (direction inclination)")
+
+    deltas, labels = _collect_transition_deltas(records, trans_idx=0)
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+    print(f"  N_success={n_succ}  N_failure={n_fail}  total={len(labels_arr)}")
+
+    if n_succ < 4 or n_fail < 4:
+        print("  SKIPPED (need at least 4 in each class for split-half)")
+        return {}
+
+    n_splits = 1000
+
+    def _compute_split_cosines(labs: np.ndarray) -> np.ndarray:
+        splitter = StratifiedShuffleSplit(
+            n_splits=n_splits, test_size=0.5, random_state=seed)
+        cosines = np.empty(n_splits)
+        for i, (idx_a, idx_b) in enumerate(splitter.split(deltas_arr, labs)):
+            d_a, l_a = deltas_arr[idx_a], labs[idx_a]
+            d_b, l_b = deltas_arr[idx_b], labs[idx_b]
+            dir_a = d_a[l_a].mean(0) - d_a[~l_a].mean(0)
+            dir_b = d_b[l_b].mean(0) - d_b[~l_b].mean(0)
+            cosines[i] = _cosine_sim(dir_a, dir_b)
+        return cosines
+
+    # Real cosines
+    real_cosines = _compute_split_cosines(labels_arr)
+    print(f"  Real split-half cosine: mean={real_cosines.mean():.3f}  "
+          f"std={real_cosines.std():.3f}  "
+          f"min={real_cosines.min():.3f}  max={real_cosines.max():.3f}")
+
+    # Null cosines (shuffled labels)
+    rng = np.random.default_rng(seed)
+    null_cosines = np.empty(n_splits)
+    for i in range(n_splits):
+        shuffled = rng.permutation(labels_arr)
+        splitter_null = StratifiedShuffleSplit(
+            n_splits=1, test_size=0.5, random_state=seed + i + 1)
+        idx_a, idx_b = next(splitter_null.split(deltas_arr, shuffled))
+        d_a, l_a = deltas_arr[idx_a], shuffled[idx_a]
+        d_b, l_b = deltas_arr[idx_b], shuffled[idx_b]
+        dir_a = d_a[l_a].mean(0) - d_a[~l_a].mean(0)
+        dir_b = d_b[l_b].mean(0) - d_b[~l_b].mean(0)
+        null_cosines[i] = _cosine_sim(dir_a, dir_b)
+
+    print(f"  Null split-half cosine: mean={null_cosines.mean():.3f}  "
+          f"std={null_cosines.std():.3f}")
+
+    # p-value: fraction of null cosines >= real mean
+    p_value = float((null_cosines >= real_cosines.mean()).mean())
+    print(f"  p-value (null >= real mean): {p_value:.4f}")
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(real_cosines, bins=50, color="#27ae60", alpha=0.6, label="Real splits")
+    ax.hist(null_cosines, bins=50, color="#e74c3c", alpha=0.6, label="Shuffled labels")
+    ax.axvline(real_cosines.mean(), color="#27ae60", linewidth=2, linestyle="--",
+               label=f"Real mean = {real_cosines.mean():.3f}")
+    ax.axvline(null_cosines.mean(), color="#e74c3c", linewidth=2, linestyle="--",
+               label=f"Null mean = {null_cosines.mean():.3f}")
+    ax.set_xlabel("Cosine similarity (direction_A, direction_B)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Split-Half Stability: 0->1 Direction (p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "split_half_stability.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'split_half_stability.png'}")
+
+    return {
+        "real_cosine_mean": float(real_cosines.mean()),
+        "real_cosine_std": float(real_cosines.std()),
+        "real_cosine_min": float(real_cosines.min()),
+        "real_cosine_max": float(real_cosines.max()),
+        "null_cosine_mean": float(null_cosines.mean()),
+        "null_cosine_std": float(null_cosines.std()),
+        "p_value": p_value,
+        "n_splits": n_splits,
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
+# ── Analysis 17: Permutation Test in PCA-100 Space ─────────────────────────
+
+def analysis_17_permutation_test_pca(
+    records_pca: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Permutation test on 0->1 direction in PCA-reduced space.
+
+    Same as Analysis 6 but on PCA-100 reduced deltas.
+    """
+    _section("Analysis 17: Permutation Test (0->1, PCA-100 space)")
+
+    deltas, labels = _collect_transition_deltas(records_pca, trans_idx=0)
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas)
+    labels_arr = np.array(labels)
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+
+    if n_succ == 0 or n_fail == 0:
+        print("  SKIPPED (need both pass and fail labels)")
+        return {}
+
+    mean_succ = deltas_arr[labels_arr].mean(axis=0)
+    mean_fail = deltas_arr[~labels_arr].mean(axis=0)
+    real_norm = float(np.linalg.norm(mean_succ - mean_fail))
+    print(f"  N_success={n_succ}  N_failure={n_fail}")
+    print(f"  Real direction norm (PCA-100): {real_norm:.2f}")
+
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels_arr)
+        ms = deltas_arr[shuffled].mean(axis=0)
+        mf = deltas_arr[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+
+    p_value = float((perm_norms >= real_norm).mean())
+    print(f"  Permutation norms: mean={perm_norms.mean():.2f}  "
+          f"std={perm_norms.std():.2f}  max={perm_norms.max():.2f}")
+    print(f"  p-value: {p_value:.4f}  "
+          f"({'significant' if p_value < 0.05 else 'NOT significant'} at alpha=0.05)")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7, label="Permuted norms")
+    ax.axvline(real_norm, color="#e74c3c", linewidth=2,
+               label=f"Real norm = {real_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure|| (PCA-100)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Permutation Test: 0->1 Direction in PCA-100 (n={len(deltas)}, "
+                 f"p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "permutation_test_pca_0to1.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'permutation_test_pca_0to1.png'}")
+
+    return {
+        "real_norm": real_norm,
+        "perm_mean": float(perm_norms.mean()),
+        "perm_std": float(perm_norms.std()),
+        "perm_max": float(perm_norms.max()),
+        "p_value": p_value,
+        "n_permutations": n_perms,
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
+# ── Analysis 18: Permutation Test in PCA-100 Space (Residualized) ───────────
+
+def analysis_18_permutation_test_pca_residualized(
+    records_pca: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Permutation test on 0->1 direction in PCA-100 space, residualized against delta_prompt_tokens.
+
+    Same as Analysis 17 but with prompt-token growth regressed out first.
+    """
+    _section("Analysis 18: Permutation Test (0->1, PCA-100, residualized)")
+
+    # Collect deltas + delta_prompt_tokens
+    deltas, labels, delta_pts = [], [], []
+    for rec in records_pca:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) < 2:
+            continue
+        curr, nxt = rec.attempts[0], rec.attempts[1]
+        if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+        delta_pts.append(nxt.prompt_tokens - curr.prompt_tokens)
+
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+    delta_pts_arr = np.array(delta_pts, dtype=np.float32)
+
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+    if n_succ == 0 or n_fail == 0:
+        print("  SKIPPED (need both pass and fail labels)")
+        return {}
+
+    # Residualize
+    reg = LinearRegression()
+    reg.fit(delta_pts_arr.reshape(-1, 1), deltas_arr)
+    deltas_resid = (deltas_arr - reg.predict(delta_pts_arr.reshape(-1, 1))).astype(np.float32)
+
+    mean_s = deltas_resid[labels_arr].mean(axis=0)
+    mean_f = deltas_resid[~labels_arr].mean(axis=0)
+    real_norm = float(np.linalg.norm(mean_s - mean_f))
+    print(f"  N_success={n_succ}  N_failure={n_fail}")
+    print(f"  Residualized direction norm (PCA-100): {real_norm:.2f}")
+
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels_arr)
+        ms = deltas_resid[shuffled].mean(axis=0)
+        mf = deltas_resid[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+
+    p_value = float((perm_norms >= real_norm).mean())
+    print(f"  Permutation norms: mean={perm_norms.mean():.2f}  "
+          f"std={perm_norms.std():.2f}  max={perm_norms.max():.2f}")
+    print(f"  p-value: {p_value:.4f}  "
+          f"({'significant' if p_value < 0.05 else 'NOT significant'} at alpha=0.05)")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7, label="Permuted (residualized)")
+    ax.axvline(real_norm, color="#e74c3c", linewidth=2,
+               label=f"Real norm = {real_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure|| (PCA-100, residualized)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Permutation Test: PCA-100 Residualized (p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "permutation_test_pca_resid_0to1.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'permutation_test_pca_resid_0to1.png'}")
+
+    return {
+        "real_norm": real_norm,
+        "perm_mean": float(perm_norms.mean()),
+        "perm_std": float(perm_norms.std()),
+        "perm_max": float(perm_norms.max()),
+        "p_value": p_value,
+        "n_permutations": n_perms,
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
+# ── Analysis 19: Permutation Test with PCA on Deltas ───────────────────────
+
+def analysis_19_permutation_test_pca_deltas(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+    n_components: int = 100,
+) -> dict:
+    """Permutation test on 0->1 direction with PCA fitted on the deltas themselves.
+
+    Unlike Analyses 17/18 (PCA fitted on attempt-0 states), this fits PCA on
+    the 0->1 deltas directly. This is the most natural space for studying
+    deltas, but it is also somewhat circular: PCA will tend to preserve the
+    dominant patterns in the deltas, which includes the repair direction itself.
+    The permutation test still controls for this (null is in the same space),
+    but the result should be interpreted with this caveat.
+
+    Runs both raw and residualized (delta_prompt_tokens removed) variants.
+    """
+    _section("Analysis 19: Permutation Test (0->1, PCA on deltas)")
+
+    # Collect deltas + metadata
+    deltas, labels, delta_pts = [], [], []
+    for rec in records:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) < 2:
+            continue
+        curr, nxt = rec.attempts[0], rec.attempts[1]
+        if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+        delta_pts.append(nxt.prompt_tokens - curr.prompt_tokens)
+
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+    delta_pts_arr = np.array(delta_pts, dtype=np.float32)
+
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+    if n_succ == 0 or n_fail == 0:
+        print("  SKIPPED (need both pass and fail labels)")
+        return {}
+
+    # Fit PCA on the deltas
+    n_comp = min(n_components, deltas_arr.shape[0], deltas_arr.shape[1])
+    pca = PCA(n_components=n_comp, random_state=seed)
+    deltas_pca = pca.fit_transform(deltas_arr)
+    var_explained = float(pca.explained_variance_ratio_.sum())
+    print(f"  PCA fitted on {len(deltas_arr)} deltas -> {n_comp} components")
+    print(f"  Variance explained: {var_explained:.1%}")
+    print(f"  N_success={n_succ}  N_failure={n_fail}")
+
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    results = {}
+
+    # --- Raw (no residualization) ---
+    mean_s = deltas_pca[labels_arr].mean(axis=0)
+    mean_f = deltas_pca[~labels_arr].mean(axis=0)
+    real_norm = float(np.linalg.norm(mean_s - mean_f))
+    print(f"  Raw direction norm (PCA-deltas): {real_norm:.2f}")
+
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels_arr)
+        ms = deltas_pca[shuffled].mean(axis=0)
+        mf = deltas_pca[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+
+    p_raw = float((perm_norms >= real_norm).mean())
+    print(f"  Permutation: null mean={perm_norms.mean():.2f}  "
+          f"std={perm_norms.std():.2f}  p={p_raw:.4f}")
+
+    results["raw_norm"] = real_norm
+    results["raw_perm_mean"] = float(perm_norms.mean())
+    results["raw_perm_std"] = float(perm_norms.std())
+    results["raw_p_value"] = p_raw
+
+    # Plot raw
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    ax = axes[0]
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7, label="Permuted")
+    ax.axvline(real_norm, color="#e74c3c", linewidth=2,
+               label=f"Real = {real_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure||")
+    ax.set_ylabel("Count")
+    ax.set_title(f"PCA-on-deltas, raw (p={p_raw:.4f})")
+    ax.legend()
+
+    # --- Residualized ---
+    reg = LinearRegression()
+    reg.fit(delta_pts_arr.reshape(-1, 1), deltas_pca)
+    deltas_pca_resid = (deltas_pca - reg.predict(
+        delta_pts_arr.reshape(-1, 1))).astype(np.float32)
+
+    mean_s_r = deltas_pca_resid[labels_arr].mean(axis=0)
+    mean_f_r = deltas_pca_resid[~labels_arr].mean(axis=0)
+    resid_norm = float(np.linalg.norm(mean_s_r - mean_f_r))
+    print(f"  Residualized direction norm (PCA-deltas): {resid_norm:.2f}")
+
+    rng2 = np.random.default_rng(seed)
+    perm_norms_r = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng2.permutation(labels_arr)
+        ms = deltas_pca_resid[shuffled].mean(axis=0)
+        mf = deltas_pca_resid[~shuffled].mean(axis=0)
+        perm_norms_r[i] = np.linalg.norm(ms - mf)
+
+    p_resid = float((perm_norms_r >= resid_norm).mean())
+    print(f"  Permutation (resid): null mean={perm_norms_r.mean():.2f}  "
+          f"std={perm_norms_r.std():.2f}  p={p_resid:.4f}")
+
+    results["resid_norm"] = resid_norm
+    results["resid_perm_mean"] = float(perm_norms_r.mean())
+    results["resid_perm_std"] = float(perm_norms_r.std())
+    results["resid_p_value"] = p_resid
+
+    # Plot residualized
+    ax = axes[1]
+    ax.hist(perm_norms_r, bins=50, color="#95a5a6", alpha=0.7, label="Permuted")
+    ax.axvline(resid_norm, color="#e74c3c", linewidth=2,
+               label=f"Real = {resid_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure|| (residualized)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"PCA-on-deltas, residualized (p={p_resid:.4f})")
+    ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(output_dir / "permutation_test_pca_deltas.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'permutation_test_pca_deltas.png'}")
+
+    results["pca_variance_explained"] = var_explained
+    results["n_components"] = n_comp
+    results["n_permutations"] = n_perms
+    results["n_success"] = n_succ
+    results["n_failure"] = n_fail
+    return results
+
+
+# ── Analysis 20: Split-Half Stability on Residualized Deltas ────────────────
+
+def analysis_20_split_half_residualized(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+) -> dict:
+    """Split-half stability test on deltas after residualizing delta_prompt_tokens.
+
+    Same as Analysis 16 but first removes the linear effect of prompt-token
+    growth from each delta dimension. This tests whether the direction's
+    inclination is stable beyond the trivially stable prompt-length component.
+    """
+    _section("Analysis 20: Split-Half Stability (residualized)")
+
+    # Collect deltas + delta_prompt_tokens
+    deltas, labels, delta_pts = [], [], []
+    for rec in records:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) < 2:
+            continue
+        curr, nxt = rec.attempts[0], rec.attempts[1]
+        if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+        delta_pts.append(nxt.prompt_tokens - curr.prompt_tokens)
+
+    if not deltas:
+        print("  SKIPPED (no 0->1 transitions)")
+        return {}
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+    delta_pts_arr = np.array(delta_pts, dtype=np.float32)
+
+    n_succ = int(labels_arr.sum())
+    n_fail = len(labels_arr) - n_succ
+    print(f"  N_success={n_succ}  N_failure={n_fail}  total={len(labels_arr)}")
+
+    if n_succ < 4 or n_fail < 4:
+        print("  SKIPPED (need at least 4 in each class)")
+        return {}
+
+    # Residualize deltas against delta_prompt_tokens
+    reg = LinearRegression()
+    reg.fit(delta_pts_arr.reshape(-1, 1), deltas_arr)
+    deltas_resid = (deltas_arr - reg.predict(
+        delta_pts_arr.reshape(-1, 1))).astype(np.float32)
+    print("  Residualized deltas against delta_prompt_tokens")
+
+    n_splits = 1000
+
+    def _compute_split_cosines(data: np.ndarray, labs: np.ndarray) -> np.ndarray:
+        splitter = StratifiedShuffleSplit(
+            n_splits=n_splits, test_size=0.5, random_state=seed)
+        cosines = np.empty(n_splits)
+        for i, (idx_a, idx_b) in enumerate(splitter.split(data, labs)):
+            d_a, l_a = data[idx_a], labs[idx_a]
+            d_b, l_b = data[idx_b], labs[idx_b]
+            dir_a = d_a[l_a].mean(0) - d_a[~l_a].mean(0)
+            dir_b = d_b[l_b].mean(0) - d_b[~l_b].mean(0)
+            cosines[i] = _cosine_sim(dir_a, dir_b)
+        return cosines
+
+    # Real cosines on residualized deltas
+    real_cosines = _compute_split_cosines(deltas_resid, labels_arr)
+    print(f"  Real split-half cosine: mean={real_cosines.mean():.3f}  "
+          f"std={real_cosines.std():.3f}  "
+          f"min={real_cosines.min():.3f}  max={real_cosines.max():.3f}")
+
+    # Null cosines (shuffled labels on residualized deltas)
+    rng = np.random.default_rng(seed)
+    null_cosines = np.empty(n_splits)
+    for i in range(n_splits):
+        shuffled = rng.permutation(labels_arr)
+        splitter_null = StratifiedShuffleSplit(
+            n_splits=1, test_size=0.5, random_state=seed + i + 1)
+        idx_a, idx_b = next(splitter_null.split(deltas_resid, shuffled))
+        d_a, l_a = deltas_resid[idx_a], shuffled[idx_a]
+        d_b, l_b = deltas_resid[idx_b], shuffled[idx_b]
+        dir_a = d_a[l_a].mean(0) - d_a[~l_a].mean(0)
+        dir_b = d_b[l_b].mean(0) - d_b[~l_b].mean(0)
+        null_cosines[i] = _cosine_sim(dir_a, dir_b)
+
+    print(f"  Null split-half cosine: mean={null_cosines.mean():.3f}  "
+          f"std={null_cosines.std():.3f}")
+
+    p_value = float((null_cosines >= real_cosines.mean()).mean())
+    print(f"  p-value (null >= real mean): {p_value:.4f}")
+
+    # Compare with raw Analysis 16
+    print(f"  (Compare: raw Analysis 16 cosine was 0.932)")
+
+    # Histogram
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(real_cosines, bins=50, color="#27ae60", alpha=0.6, label="Real splits")
+    ax.hist(null_cosines, bins=50, color="#e74c3c", alpha=0.6, label="Shuffled labels")
+    ax.axvline(real_cosines.mean(), color="#27ae60", linewidth=2, linestyle="--",
+               label=f"Real mean = {real_cosines.mean():.3f}")
+    ax.axvline(null_cosines.mean(), color="#e74c3c", linewidth=2, linestyle="--",
+               label=f"Null mean = {null_cosines.mean():.3f}")
+    ax.set_xlabel("Cosine similarity (direction_A, direction_B)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Split-Half Stability: Residualized (p={p_value:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "split_half_stability_residualized.png", dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'split_half_stability_residualized.png'}")
+
+    return {
+        "real_cosine_mean": float(real_cosines.mean()),
+        "real_cosine_std": float(real_cosines.std()),
+        "real_cosine_min": float(real_cosines.min()),
+        "real_cosine_max": float(real_cosines.max()),
+        "null_cosine_mean": float(null_cosines.mean()),
+        "null_cosine_std": float(null_cosines.std()),
+        "p_value": p_value,
+        "n_splits": n_splits,
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _make_serializable(obj: object) -> object:
@@ -1528,6 +2268,34 @@ def main() -> None:
     # ---- Analysis 13: prompt-length correlation check ----
     all_metrics["prompt_correlation"] = analysis_13_prompt_correlation(
         records, OUTPUT_DIR)
+
+    # ---- Analysis 14: residualized probe ----
+    all_metrics["residualized_probe"] = analysis_14_residualized_probe(
+        records, SEED)
+
+    # ---- Analysis 15: direction residualized against delta_prompt_tokens ----
+    all_metrics["direction_residualized"] = analysis_15_direction_residualized(
+        records, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 16: split-half stability ----
+    all_metrics["split_half_stability"] = analysis_16_split_half_stability(
+        records, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 17: permutation test in PCA space ----
+    all_metrics["permutation_test_pca"] = analysis_17_permutation_test_pca(
+        records_pca, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 18: permutation test in PCA space (residualized) ----
+    all_metrics["permutation_test_pca_resid"] = analysis_18_permutation_test_pca_residualized(
+        records_pca, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 19: permutation test with PCA on deltas ----
+    all_metrics["permutation_test_pca_deltas"] = analysis_19_permutation_test_pca_deltas(
+        records, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 20: split-half stability (residualized) ----
+    all_metrics["split_half_residualized"] = analysis_20_split_half_residualized(
+        records, SEED, OUTPUT_DIR)
 
     # ---- Save all numerical metrics to JSON ----
     metrics_path = OUTPUT_DIR / "metrics.json"

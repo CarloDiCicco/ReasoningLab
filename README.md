@@ -143,14 +143,16 @@ The trajectory analysis script (`scripts/analyze_trajectories.py`) was extended 
 
 *Results*:
 
-| Classifier | N | Pass rate | CV AUC | Test AUC |
-|---|---|---|---|---|
-| Pooled (all attempts) | 1494 | 15.5% | 0.919 | 0.936 |
-| Attempt 0 only | 444 | 15.8% | 0.923 | 0.927 |
-| Attempt 1 only | 374 | 36.4% | 0.895 | 0.831 |
-| Attempt 2 only | 238 | 6.7% | 0.709 | 0.741 |
-| Attempt 3 only | 222 | 2.7% | 0.305 | 0.977 |
-| Attempt 4 only | 216 | 1.4% | NaN | 0.953 |
+| Classifier | N | Pass rate | CV AUC | Test AUC | Accuracy | F1 |
+|---|---|---|---|---|---|---|
+| Pooled (all attempts) | 1494 | 15.5% | 0.919 | 0.936 | 0.893 | 0.610 |
+| Attempt 0 only | 444 | 15.8% | 0.923 | 0.927 | 0.854 | 0.480 |
+| Attempt 1 only | 374 | 36.4% | 0.895 | 0.831 | 0.773 | 0.679 |
+| Attempt 2 only | 238 | 6.7% | 0.709 | 0.741 | 0.938 | 0.000 |
+| Attempt 3 only | 222 | 2.7% | 0.305 | 0.977 | 0.978 | 0.000 |
+| Attempt 4 only | 216 | 1.4% | NaN | 0.953 | 0.977 | 0.000 |
+
+**Why F1 drops from Experiment 2 (~0.88) to here (~0.48-0.61)**: Experiment 2 had ~50% positive rate (balanced dataset). Here the positive rate is 15.8% at attempt 0. At the default threshold of 0.5, the probe predicts "fail" for nearly everything — high accuracy (85%) but F1 crashes. This is a threshold artifact, not a signal loss. AUC (threshold-independent) remains at 0.927, matching Experiment 2. With optimal threshold tuning, F1 would recover substantially.
 
 *Interpretation*: The attempt-0 probe replicates Experiment 2 at essentially the same AUC (~0.92), on a larger and more diverse dataset. The pooled probe reaches AUC 0.936 because it has 3x more data. Attempt 1 still has real signal (CV AUC 0.895). Attempts 2-4 are unreliable — the CV AUC collapses or goes NaN because the positive class drops to 2-7% and cross-validation folds end up with zero positives. F1 is 0.0 at attempts 2-4: the classifier just predicts "fail" for everything, which is trivially ~97% accurate. **This is data starvation at the positive-class level, not a model-state change.**
 
@@ -162,24 +164,26 @@ The trajectory analysis script (`scripts/analyze_trajectories.py`) was extended 
 
 | Transition | N success | N failure | ‖direction‖ |
 |---|---|---|---|
-| 0 -> 1 | 136 | 191 | 40.54 |
-| 1 -> 2 | 16 | 175 | 43.70 |
-| 2 -> 3 | 6 | 169 | 27.02 |
-| 3 -> 4 | 3 | 166 | 60.91 |
+| 0 -> 1 | 128 | 108 | 23.78 |
+| 1 -> 2 | 13 | 137 | 55.65 |
+| 2 -> 3 | 4 | 150 | 38.52 |
+| 3 -> 4 | 2 | 154 | 85.79 |
+
+**Note**: All direction analyses exclude tasks where attempt 0 hit the 768-token generation limit (91 tasks). These are cases where the model generated truncated garbage code, which gets pasted into the repair prompt and distorts the hidden-state deltas. See "Data cleaning" note below Analysis 6.
 
 Cosine similarity between per-transition directions:
 
 |  | 1->2 | 2->3 | 3->4 |
 |---|---|---|---|
-| **0->1** | 0.757 | 0.727 | 0.660 |
-| **1->2** | — | 0.805 | 0.840 |
-| **2->3** | — | — | 0.683 |
+| **0->1** | 0.342 | 0.370 | 0.183 |
+| **1->2** | — | 0.807 | 0.824 |
+| **2->3** | — | — | 0.732 |
 
-Pooled (all transitions): 161 success deltas, 701 fail deltas, direction norm 79.30.
+Pooled (all transitions): 147 success deltas, 549 fail deltas, direction norm 90.86.
 
-*Interpretation*: All four per-transition directions have non-trivial norms and all pairwise cosines are in the 0.66-0.84 range. That is unusual for random vectors in 2560-dim space, where expected cosine is near zero. The direction has the same geometric signature across every repair step. Later-step estimates (1->2, 2->3, 3->4) have weak support (n=3-16 successes), so by themselves they would not be trustworthy — but the cosine with the well-supported 0->1 direction (n=136) is still 0.66-0.76, which argues that the later-step directions are consistent with the 0->1 one rather than random.
+*Interpretation*: After data cleaning, the 0->1 direction's cosine alignment with later steps dropped substantially (0.18-0.37 vs 0.66-0.76 before cleaning), suggesting the old alignment was partly driven by the maxed-out cases. Later-step directions (1→2, 2→3, 3→4) remain mutually consistent (cosine 0.73-0.82) but have n_success = 2-13, so they are not independently load-bearing.
 
-The 0->1 transition is by far the best-supported (n=136 success vs n=191 failure). Everything downstream treats it as the primary evidence.
+The 0->1 transition is by far the best-supported (n=128 success vs n=108 failure on clean data). Everything downstream treats it as the primary evidence.
 
 ##### Analysis 3 — Convergence (directional consistency + projection per step)
 
@@ -187,8 +191,8 @@ The 0->1 transition is by far the best-supported (n=136 success vs n=191 failure
 
 *Results*:
 
-- Directional consistency (pass trajectories): cos = -0.185 ± 0.194 (n=37 delta pairs)
-- Directional consistency (fail trajectories): cos = -0.253 ± 0.248 (n=498 delta pairs)
+- Directional consistency (pass trajectories): cos = -0.137 ± 0.245 (n=37 delta pairs)
+- Directional consistency (fail trajectories): cos = -0.230 ± 0.312 (n=498 delta pairs)
 
 Projection onto repair direction by step (pass / fail means):
 
@@ -227,17 +231,19 @@ Projection onto repair direction by step (pass / fail means):
 
 ##### Analysis 6 — Permutation test on 0->1 repair direction
 
-*What*: Address the core concern from Experiment 4 — "is the 0->1 repair direction real, or would shuffled labels produce similar norms?" Collect all 327 0->1 deltas. Record the real norm 40.54. Then 1000 times, shuffle the pass/fail labels and recompute `‖mean(pass) - mean(fail)‖`. Compare the real norm to the permuted null distribution. A p-value of (# permuted norms >= real) / 1000.
+*What*: Address the core concern from Experiment 4 — "is the 0->1 repair direction real, or would shuffled labels produce similar norms?" Collect all 236 clean 0->1 deltas. Record the real norm 23.78. Then 1000 times, shuffle the pass/fail labels and recompute `‖mean(pass) - mean(fail)‖`. Compare the real norm to the permuted null distribution. A p-value of (# permuted norms >= real) / 1000.
 
 *Results*:
 
-- Real direction norm: **40.54**
-- Permuted null: mean = 8.48, std = 1.48, max = 14.997
-- **p-value = 0.000** (not a single permutation out of 1000 reached the real norm; the real norm sits ~21 standard deviations above the null mean)
+- Real direction norm: **23.78**
+- Permuted null: mean = 9.07, std = 1.43, max = 16.14
+- **p-value = 0.000** (not a single permutation out of 1000 reached the real norm; the real norm sits ~10 standard deviations above the null mean)
 
 Output image: `results/h2/trajectory_analysis/permutation_test_0to1.png`
 
 *Interpretation*: The direction is statistically real. It is not a chance artifact of comparing two arbitrary subsets of the delta population. Whatever it encodes is specifically tied to the pass/fail label, not to any shared property of 0->1 transitions. Note that this test does NOT prove the direction encodes "understanding the fix" — it only rules out random chance. We still need to control for confounds like prompt length (done in Analyses 8 and 13).
+
+**Data cleaning note**: All direction analyses (2, 6, 8, 11, 15-20) exclude two categories of tasks from 0->1 deltas: (1) repetition-loop tasks (47 tasks where the model generates the same broken output at the token limit across all 5 attempts), and (2) tasks where attempt 0 hit the 768-token generation limit without being a full repetition loop (91 additional tasks). These maxed-out generations are truncated garbage code that gets pasted into the repair prompt, creating massive prompt-length inflation (median delta_prompt_tokens ~900 for these vs ~350 for clean tasks). 83 of the 91 fail at attempt 1 (vs 46% fail rate in clean data), making them a contamination source. After filtering: 236 clean 0->1 transitions (128 success, 108 fail).
 
 ##### Analysis 7 (helper) — PCA reduction fitted on attempt-0 states only
 
@@ -255,16 +261,12 @@ Output image: `results/h2/trajectory_analysis/permutation_test_0to1.png`
 
 | Transition | ‖direction‖ (raw) | ‖direction‖ (PCA-100) |
 |---|---|---|
-| 0 -> 1 | 40.54 | 26.69 |
-| 1 -> 2 | 43.70 | 31.39 |
-| 2 -> 3 | 27.02 | 18.27 |
-| 3 -> 4 | 60.91 | 44.89 |
+| 0 -> 1 | 23.78 | 16.81 |
+| 1 -> 2 | 55.65 | (not computed) |
+| 2 -> 3 | 38.52 | (not computed) |
+| 3 -> 4 | 85.79 | (not computed) |
 
-Cosine consistency (PCA space): 0->1 vs 1->2 = 0.717, 1->2 vs 2->3 = 0.827, 1->2 vs 3->4 = **0.880**, 2->3 vs 3->4 = 0.720. Pooled direction norm: 59.52.
-
-*Interpretation*: The direction survives dimensionality reduction. Norms shrink (expected — we dropped 2460 dimensions, some of which carried signal), but the cosine consistency between *later*-step transitions actually do not disappear (e.g., 1->2 vs 3->4 goes from 0.840 to 0.880). This is the cleanest geometric result: removing the 2460 dimensions that did not show attempt-0 variance do not decrease the repair-direction consistency between 1->2, 2->3, and 3->4. The 0->1 transition drops slightly in cosine alignment with later steps, consistent with the interpretation that 0->1 carries an additional prompt-structure component that later transitions do not.
-
-**Gap**: we did not run a permutation test in PCA space — the norm shrinkage (40.54 -> 26.69) cannot be directly compared to the 2560-dim null (mean 8.48). A permutation test on the PCA-reduced 0->1 deltas would close this gap and is a reasonable next step.
+*Interpretation*: The 0->1 direction survives dimensionality reduction (23.78 → 16.81). Later-step norms are large but unreliable (n_success = 2-13). The 0->1 cosine alignment with later steps dropped after data cleaning (0.34-0.37 vs previously 0.66-0.76), suggesting the old alignment was partly driven by the maxed-out cases. Later-step directions (1→2, 2→3, 3→4) remain mutually consistent (cosine 0.73-0.82) but are not independently load-bearing due to tiny success counts.
 
 ##### Analysis 9 — Convergence in PCA-reduced space
 
@@ -302,13 +304,13 @@ Cosine consistency (PCA space): 0->1 vs 1->2 = 0.717, 1->2 vs 2->3 = 0.827, 1->2
 
 Output image: `results/h2/trajectory_analysis/projection_histogram_0to1.png`
 
-*Interpretation*: Both distributions are entirely positive (all projections in the 60-140 range), because the 0->1 step includes the shared prompt-structure shift that pushes every delta forward along this direction. The pass and fail distributions are clearly offset (means differ by ~18) but visibly overlap in the 95-120 range. Cohen's d = 0.91 confirms a real mean difference, but the overlap rules out using a single projection value as a reliable per-task predictor. **Interpretation**: the "pass" deltas are longer projections along the repair direction than "fail" deltas — the shift is not just present but *bigger in magnitude* when the model is about to succeed.
+*Interpretation*: After data cleaning, Cohen's d dropped from 0.91 to 0.32 — the large effect size was inflated by the maxed-out cases. On the clean 236 tasks, the pass and fail projection distributions overlap substantially (means 123.9 vs 119.3). The direction still has a statistically significant magnitude (permutation test p<0.001, Analysis 6) and stable inclination (split-half cosine 0.756, Analysis 16), but the per-task projection separation is modest.
 
 ##### Analysis 12 — Focused PCA plot (attempt 0 -> attempt 1 transitions only)
 
 *What*: Take only the 327 non-loop tasks with at least 2 attempts. Fit PCA(n=2) on just the attempt-0 states. Project both attempt-0 and attempt-1 states into this 2D space. Plot circles for attempt-0, triangles for attempt-1, arrows from 0 to 1, colored by attempt-1 outcome (green pass / red fail). Avoids the clutter of the Analysis-4 global plot.
 
-*Result*: PC1 = 23.7% variance, PC2 = 13.0% variance, 327 tasks (136 pass, 191 fail).
+*Result*: PC1 = 23.7% variance, PC2 = 13.0% variance, 327 tasks plotted (136 pass, 191 fail). Note: Analysis 12 plots all non-loop tasks including maxed-out ones; the data cleaning filter applies only to direction analyses.
 
 *Interpretation*: **Weak.** There is a mild left-right tendency (more green on the upper-left, more red on the right) but the separation is far from clean, and 2 components only explain 36.7% of attempt-0 variance. Cannot be used as standalone evidence.
 
@@ -327,76 +329,210 @@ Output image: `results/h2/trajectory_analysis/pc_vs_prompt_tokens.png`
 
 *Interpretation*: **This is the most important negative finding of Experiment 5.** PC1 of the full-data PCA — the single most explanatory axis (38.7% of all variance) — is dominantly encoding prompt length. The big left-right structure in Analysis 4 is mostly "attempt 0 has a short prompt, attempts 1+ have longer prompts." PC2 is clean (r=0.127). This retroactively invalidates any interpretation of Analysis 4's plot that relied on PC1 as "task/repair geometry." It also motivates the use of attempt-0-fitted PCA in Analyses 8/9/10 (since that PCA cannot contain the cross-attempt prompt-length axis by construction — though it still partially correlates with prompt length across tasks, r=0.509 at PC1, because harder tasks tend to have longer problem descriptions).
 
-#### 5.3 Follow-up control test — residualizing out prompt length from the probe
+##### Analysis 14 — Residualized probe (formal prompt-length control)
 
-After seeing Analysis 13, we ran a control experiment outside the 13-analysis script to answer the question directly: *"Is the Experiment 2 probe just learning prompt length?"*
-
-*Method*: For each of the 2560 hidden-state dimensions at attempt 0, fit a univariate linear regression on `prompt_tokens` and subtract the fitted line. This removes the linear effect of prompt length from every dimension. The resulting "residual" hidden states have *zero* linear correlation with `prompt_tokens` on every PC (verified: r = 0.000 for PC1-PC5 after residualization). Then train the standard probe on these residuals.
+*What*: Formalized version of the earlier ad-hoc control test. Trains three probes on attempt-0 hidden states (444 samples, same train/test split as Analysis 1):
+1. **Raw**: standard probe on unchanged hidden states
+2. **Residualized**: for each of the 2560 dimensions, fit `h_dim = slope * prompt_tokens + intercept` on the train set only, subtract predictions from both sets. This removes all linear prompt-length information.
+3. **Prompt-only**: just `prompt_tokens` as the single feature (floor — how well can prompt length alone predict pass/fail?)
 
 *Results*:
 
-| Predictor | CV AUC | Test AUC |
+| Probe | Test AUC | CV AUC |
 |---|---|---|
-| `prompt_tokens` alone | 0.761 | 0.786 |
-| Hidden states (original, baseline) | 0.923 | 0.927 |
-| Hidden states with `prompt_tokens` regressed out | **0.890** | **0.879** |
+| Raw | 0.927 | 0.923 |
+| Residualized | 0.909 | 0.888 |
+| Prompt-only | 0.786 | 0.746 |
 
-*Interpretation*: Prompt length by itself is a non-trivial predictor (AUC 0.76) — shorter prompts tend to be easier problems. But the probe on residualized hidden states still achieves AUC ~0.88. The drop from 0.92 to 0.88 says prompt length was contributing about 4 points of AUC to the original probe. The remaining ~12 points of AUC above prompt-length-alone (0.88 vs 0.76) is signal that cannot be reduced to prompt length by any linear function. **The probe is not merely reading prompt length. The signal is predominantly beyond prompt structure.**
+AUC drop from residualization: -0.018. Signal above prompt-only: +0.123.
 
-This also partially rehabilitates the repair direction: the direction is computed from deltas, and every 0->1 delta shares approximately the same prompt-length change, so the contrastive subtraction cancels out most of the prompt-length contribution even without explicit residualization. Combined with the permutation test (Analysis 6) and the residualized probe, prompt length cannot be the sole explanation of the direction.
+*Interpretation*: The residualized probe loses only ~2 AUC points. Prompt length alone is a decent predictor (AUC 0.786) because in this dataset longer prompts tend to be harder tasks, but the hidden state carries 12.3 AUC points of signal beyond prompt length. **The probe's ability to predict correctness is real and not reducible to prompt structure.** Note: the prompt-only baseline being 0.786 is a property of this dataset's difficulty-length correlation, not a general property of the model.
 
-#### 5.4 Consolidated summary — Experiment 5
+##### Analysis 15 — Direction residualized against delta_prompt_tokens
+
+*What*: For each 0->1 delta (h_attempt1 - h_attempt0), compute delta_prompt_tokens = prompt_tokens[attempt_1] - prompt_tokens[attempt_0]. For each of the 2560 dimensions, regress delta_dim on delta_prompt_tokens and subtract the prediction. This removes the component of the hidden-state shift that is linearly explained by "the prompt grew." Then recompute the repair direction on the residualized deltas and run a permutation test (1000 shuffles of pass/fail labels, same procedure as Analysis 6).
+
+*Results*:
+
+| Metric | Raw | Residualized |
+|---|---|---|
+| Direction norm | 23.78 | 16.62 |
+| Norm retention | - | 69.9% |
+| Permutation null mean | 9.07 | 8.71 |
+| Permutation null std | 1.43 | 1.33 |
+| p-value | <0.001 | <0.001 |
+
+N = 236 (128 success, 108 fail). Output image: `results/h2/trajectory_analysis/direction_residualized_permtest.png`
+
+*Interpretation*: After data cleaning (removing maxed-out attempt-0 cases), residualization only reduces the norm by 30% (from 23.78 to 16.62), compared to 68% before cleaning. This means the old 68% drop was driven by the garbage cases, not by a genuine prompt-length confound. The residualized norm (16.62) is highly significant (p<0.001, ~6 sigma above null).
+
+**Caveat on residualization**: The residualization regresses each hidden-state dimension on `delta_prompt_tokens` (how much the prompt grew from attempt 0 to 1). This removes the linear effect of prompt length growth, but `delta_prompt_tokens` is entangled with the content of the feedback (longer wrong code → longer repair prompt). Removing prompt length does not remove the meaning of what's in the prompt. The residualized numbers are a sensitivity check, not the primary result. The primary evidence is the raw permutation test (norm 23.78, p<0.001) on clean data.
+
+##### Analysis 16 — Split-half stability test (direction inclination)
+
+*What*: Tests whether the direction's *orientation* (not just magnitude) is a stable property. Procedure:
+1. Take 236 clean 0->1 deltas (128 pass, 108 fail)
+2. Randomly split in half (stratified by label so each half has ~64 pass, ~54 fail)
+3. Compute direction_A on half A, direction_B on half B
+4. Measure cosine(direction_A, direction_B)
+5. Repeat 1000 times with different random splits -> distribution of real cosines
+6. Null distribution: shuffle pass/fail labels randomly, then do the same split-and-compare, 1000 times. This answers: "if pass/fail labels were meaningless, would random directions from two halves still be consistent?"
+
+*Results*:
+
+| Distribution | Mean cosine | Std | Min | Max |
+|---|---|---|---|---|
+| Real splits (1000) | **0.756** | 0.070 | 0.433 | 0.886 |
+| Null / shuffled labels (1000) | -0.009 | 0.217 | - | - |
+
+p < 0.001 (zero null cosines exceeded the real mean of 0.756).
+
+Output image: `results/h2/trajectory_analysis/split_half_stability.png`
+
+*Interpretation*: The direction is moderately stable across random data splits — two independent halves agree on direction with cosine ~0.76 on average, far above the null (~0). This is a real geometric property of the data. The signal is moderate: cosine 0.756 means the two halves agree on roughly 75% of the direction's orientation. The worst-case split still gives cosine 0.433.
+
+##### Analysis 17 — Permutation test in PCA-100 space
+
+*What*: Same permutation test as Analysis 6 but on PCA-100 reduced deltas (PCA fitted on attempt-0 states only). 1000 label shuffles.
+
+*Results*:
+
+| Metric | Value |
+|---|---|
+| Real direction norm (PCA-100) | 16.81 |
+| Null mean | 7.52 |
+| Null std | 1.37 |
+| Null max | 14.72 |
+| p-value | <0.001 |
+
+N = 236 (128 success, 108 fail). Output image: `results/h2/trajectory_analysis/permutation_test_pca_0to1.png`
+
+*Interpretation*: The direction is ~2.2x the null mean and exceeds the null max. Significant in the reduced space.
+
+##### Analysis 18 — Permutation test in PCA-100 space (residualized)
+
+*What*: Same as Analysis 17 but with delta_prompt_tokens regressed out of the PCA-100 deltas before testing. This is the most conservative test: dimensionality-reduced AND prompt-length-residualized.
+
+*Results*:
+
+| Metric | Value |
+|---|---|
+| Residualized direction norm (PCA-100) | 11.93 |
+| Null mean | 7.28 |
+| Null std | 1.31 |
+| Null max | 13.96 |
+| p-value | 0.003 |
+
+N = 236 (128 success, 108 fail). Output image: `results/h2/trajectory_analysis/permutation_test_pca_resid_0to1.png`
+
+*Interpretation*: After data cleaning, this result improved from p=0.018 to p=0.003. The old weak result was caused by the garbage cases distorting both the PCA space and the residualization. See also Analysis 19 below for the PCA-on-deltas variant.
+
+**Note on Analyses 17/18 PCA design**: The PCA here was fitted on attempt-0 hidden states, but we are studying deltas (attempt1 - attempt0). There is no guarantee that the dimensions where repair signal lives are the same dimensions that vary most across tasks at the initial prompt. If the repair-relevant dimensions are quiet at attempt 0, PCA discards them. Analysis 19 tests this directly.
+
+##### Analysis 19 — Permutation test with PCA fitted on deltas
+
+*What*: Same permutation test as Analyses 17/18, but PCA is fitted on the 236 clean 0->1 deltas themselves instead of on attempt-0 states. This is the most natural space for studying deltas — the dimensionality reduction captures the axes where the deltas actually vary, not where the initial prompts vary. Runs both raw and residualized (delta_prompt_tokens removed) variants.
+
+**Caveat**: This is somewhat circular — PCA fitted on deltas will tend to preserve the dominant patterns in the deltas, which includes the repair direction itself. The permutation test still controls for this (null is computed in the same PCA space with shuffled labels), but the result should not be taken as independent confirmation.
+
+*Results*:
+
+| Variant | Real norm | Null mean | Null std | p-value |
+|---|---|---|---|---|
+| Raw | 23.71 | 8.77 | 1.48 | <0.001 |
+| Residualized | 16.52 | 8.40 | 1.38 | <0.001 |
+
+PCA: 100 components, 93.9% variance explained. N = 236 (128 success, 108 fail).
+
+Output image: `results/h2/trajectory_analysis/permutation_test_pca_deltas.png`
+
+*Interpretation*: PCA-on-deltas recovers the same numbers as the full 2560-dim tests (Analysis 6: norm 23.78, Analysis 15 residualized: norm 16.62). This confirms that the attempt-0 PCA design is suboptimal for delta analysis but the signal is robust across PCA choices.
+
+**Full magnitude comparison table:**
+
+| Analysis | PCA space | Residualized? | Real norm | Null mean | p-value |
+|---|---|---|---|---|---|
+| 6 | None (2560-dim) | No | 23.78 | 9.07 | <0.001 |
+| 15 | None (2560-dim) | Yes | 16.62 | 8.71 | <0.001 |
+| 17 | Attempt-0 (100-dim) | No | 16.81 | 7.52 | <0.001 |
+| 18 | Attempt-0 (100-dim) | Yes | 11.93 | 7.28 | 0.003 |
+| 19 | Deltas (100-dim) | No | 23.71 | 8.77 | <0.001 |
+| 19 | Deltas (100-dim) | Yes | 16.52 | 8.40 | <0.001 |
+
+All results on 236 clean tasks (128 success, 108 fail). The primary evidence for magnitude is Analysis 6 (raw permutation test, 2560-dim, p<0.001). The residualized variants (Analyses 15, 18, 19) are sensitivity checks — see caveat in Analysis 15 about why residualization is not fully justified conceptually.
+
+##### Analysis 20 — Split-half stability (residualized, sensitivity check)
+
+*What*: Residualizes the 0→1 deltas against delta_prompt_tokens (via LinearRegression, same as Analysis 15) before running the split-half stability test. 1000 stratified splits + 1000 null (shuffled labels). N = 236 (128 success, 108 fail).
+
+*Results*:
+
+| Variant | Mean cosine | Std | Min | Max | Null mean | p-value |
+|---|---|---|---|---|---|---|
+| Raw (Analysis 16) | 0.756 | 0.070 | 0.433 | 0.886 | -0.009 | <0.001 |
+| Residualized | 0.575 | 0.101 | 0.180 | 0.774 | -0.012 | <0.001 |
+
+Output image: `results/h2/trajectory_analysis/split_half_stability_residualized.png`
+
+*Interpretation*: On clean data, the residualization reduces the cosine from 0.756 to 0.575 — a modest drop (24%), unlike the dramatic drop seen before data cleaning (0.932 → 0.496 on the dirty 327 tasks). The residualized signal is still highly significant (p<0.001).
+
+**Same caveat as Analysis 15**: residualizing against delta_prompt_tokens removes the linear effect of prompt length, but prompt length is entangled with the content of the feedback (the wrong code, the error message). The model's hidden state doesn't just encode "how many tokens I read" — it encodes a compressed understanding of what those tokens say. Removing length without removing content is an incomplete correction that may remove real signal. The primary result is Analysis 16 (raw cosine 0.756, p<0.001) on clean data.
+
+#### 5.3 Consolidated summary — Experiment 5 (updated after data cleaning and Analyses 14-20)
+
+**Data cleaning**: Direction analyses exclude tasks where attempt 0 hit the 768-token generation limit. These 91 tasks (plus 47 repetition loops) generated truncated garbage code that gets pasted into the repair prompt, creating extreme prompt-length inflation. 83 of the 91 fail at attempt 1 (vs 46% fail rate in clean data). After filtering: 236 clean 0->1 transitions (128 success, 108 fail). The probe analyses (Analyses 1, 14) are unaffected — they use attempt-0 hidden states only, no repair deltas.
 
 **What worked (solid, defensible):**
 
 1. **The probe replicates at scale** on 444 mixed-difficulty tasks: attempt-0 test AUC 0.927, CV AUC 0.923. Same number as Experiment 2, different dataset, larger sample. (Analysis 1)
 
-2. **The probe survives prompt-length residualization**: AUC drops from 0.927 to 0.879 when prompt length is linearly removed from every hidden-state dimension. Prompt length contributes ~4 AUC points; the remaining ~12 AUC points above prompt-length-alone (0.76) is real signal beyond prompt structure. (Follow-up control test)
+2. **The probe survives prompt-length residualization**: AUC drops from 0.927 to 0.909 when prompt length is linearly removed from every hidden-state dimension. Prompt-only baseline is 0.786; the residualized probe is 12.3 AUC points above that. **The probe is not merely reading prompt length.** (Analysis 14)
 
-3. **The 0->1 repair direction is statistically significant**: real norm 40.54 vs permuted null mean 8.48 (std 1.48, max 14.997), p < 0.001 with 1000 permutations. Not a chance artifact. (Analysis 6)
+3. **The 0->1 repair direction magnitude is statistically significant**: on 236 clean tasks, the contrastive direction norm is 23.78 (p<0.001, Analysis 6). The permutation test shuffles pass/fail labels 1000 times; no shuffle reaches the real norm (~10 sigma above null mean 9.07). PCA variants confirm: PCA-on-deltas gives norm 23.71 (p<0.001, Analysis 19), PCA-on-attempt-0 gives norm 16.81 (p<0.001, Analysis 17). See full comparison table in Analysis 19. Residualization sensitivity check: norm drops to 16.62 (70% retention, p<0.001, Analysis 15), but this correction is conceptually questionable — see caveat in Analysis 15.
 
-4. **The direction has a stable geometric signature across later repair steps** (cosine similarity 0.83-0.88 between 1->2, 2->3, 3->4 in the PCA-reduced space). It is not one-shot; it is a reproducible property of "the shift that happens when the model is about to produce correct code." (Analyses 2, 8)
-
-5. **The direction encodes both inclination and magnitude**: Cohen's d = 0.91 on projection values of individual 0->1 deltas onto the pooled repair direction. The shift for pass deltas is not just in a characteristic direction, it is also *larger* in that direction than for fail deltas. (Analysis 11)
+4. **The direction inclination is moderately stable**: split-half cosine 0.756 (p<0.001, Analysis 16). Two random halves of the data independently discover directions that agree ~75% on orientation. Residualization sensitivity check: cosine drops to 0.575 (p<0.001, Analysis 20) — same caveat applies. Later-step directions (1→2, 2→3, 3→4) are mutually consistent (cosine 0.73-0.82) but have n_success = 2-13, so they are not independently load-bearing. The 0->1 direction's cosine alignment with later steps is weak (0.18-0.37), suggesting the 0->1 direction is partly specific to the first repair transition. (Analyses 2, 16, 20)
 
 **What did not work (honest negatives):**
 
-6. **No convergence.** Directional consistency between consecutive deltas within the same trajectory is slightly negative for both pass (cos = -0.185) and fail (cos = -0.253) groups. The model does not progressively move toward a solution in representation space. Each repair step is nearly independent of the previous one. (Analyses 3, 9)
+5. **No convergence.** Directional consistency between consecutive deltas within the same trajectory is slightly negative for both pass (cos = -0.137) and fail (cos = -0.230) groups. The model does not progressively move toward a solution in representation space. Each repair step is nearly independent of the previous one. (Analyses 3, 9)
 
-7. **Pass rates collapse after attempt 1** (15.8% -> 36.4% -> 6.7% -> 2.7% -> 1.4%). Error feedback helps dramatically once, then hits a ceiling. Consistent with "no iterative refinement."
+6. **Pass rates collapse after attempt 1** (15.8% -> 36.4% -> 6.7% -> 2.7% -> 1.4%). Error feedback helps dramatically once, then hits a ceiling. Consistent with "no iterative refinement."
 
-8. **Analysis 4 (full-data PCA trajectory plot) is contaminated**: PC1 (r=-0.765 with prompt_tokens) is mostly encoding prompt length, not repair geometry. The triangle/arrow structure in that plot is largely an artifact. (Analysis 13)
+7. **Analysis 4 (full-data PCA trajectory plot) is contaminated**: PC1 (r=-0.765 with prompt_tokens) is mostly encoding prompt length, not repair geometry. The triangle/arrow structure in that plot is largely an artifact. (Analysis 13)
 
-9. **Analysis 5 (distance to attempt-0-pass centroid) inherits the same confound** and shows no separation between pass and fail distance curves after step 1.
+8. **Analysis 5 (distance to attempt-0-pass centroid) inherits the same confound** and shows no separation between pass and fail distance curves after step 1.
 
-10. **Analysis 10 (distance to first-pass centroid in PCA space)** showed a modest step-1 gap (50.5 vs 62.9) that does not persist and is not strong enough to build a claim on.
+9. **Analysis 10 (distance to first-pass centroid in PCA space)** showed a modest step-1 gap (50.5 vs 62.9) that does not persist and is not strong enough to build a claim on.
 
-11. **Analysis 12 (focused PCA plot)** shows weak visual separation but only explains 36.7% of attempt-0 variance in 2D — not actionable.
+10. **Analysis 12 (focused PCA plot)** shows weak visual separation but only explains 36.7% of attempt-0 variance in 2D — not actionable.
 
-**Gaps and things we did not do:**
+11. **Cohen's d dropped from 0.91 to 0.32 after data cleaning** (Analysis 11). The large effect size was inflated by the maxed-out cases. On clean data, per-task projection separation is modest.
 
-- No permutation test in PCA-reduced space (Analysis 8 norms cannot be directly compared to Analysis 6 null).
-- Can we confirm with the permutation test (or similar test) that also the direction inclination (not just the magnitude) of success/correct code is real and is not just random result? Would it make sense?
-- The results and beliefs we have about direction of success both in terms of inclination and magnitude, can be deleted by the facts that the PC1 (fitted on all attempts data) encode the prompt structure? or maybe by the fact that even the PCA fitted on attept 0 data encodes partially the prompt length (that is related to the task difficulty) ? Does these two facts disrupt (even partially) our most important thesis from these experiment, indeed, about the inclination e magnitude of direction of success? Explain your answer well
-- Would be good to write down a test (we did it fastly without writing it down) to prove that the prediction of the success generation of code by using the hidden state vector, so the  Experiment 2: H2 Probe — Logistic Classifier on Hidden States (2026-03-14) is not just reading the prompot length, that in our dataset is partially related to the prompt length 
-- We should report the F1 scores for the analysis 2, as we done for Experiment 2: H2 Probe — Logistic Classifier on Hidden States (2026-03-14), explain their values, and if and why they change from the Experiment 2: H2 Probe — Logistic Classifier on Hidden States (2026-03-14)
-- No per-error-type breakdown of "which error types lead to successful repair" (would help distinguish "the model genuinely cannot extract more info from later errors" from "sampling noise").
-- No residualization of the repair direction itself against prompt length (the contrastive subtraction does it implicitly, but an explicit test would be cleaner).
-- Later-step analyses (1->2, 2->3, 3->4) have n_success = 16, 6, 3 — these support but cannot by themselves establish the direction claim. All load-bearing evidence is the 0->1 transition.
+**Gaps addressed by Analyses 14-20** (previously listed as open questions):
 
-#### 5.5 Proposed unified insight (DRAFT — to be discussed together)
+- ~~No formal residualization script~~ -> Analysis 14 (probe) and Analysis 15 (direction). Both survive, but residualization caveat noted.
+- ~~No permutation test in PCA-reduced space~~ -> Analysis 17 (p<0.001) and Analysis 18 with residualization (p=0.003).
+- ~~No test for direction inclination stability~~ -> Analysis 16 (split-half cosine=0.756, p<0.001).
+- ~~No F1 scores reported~~ -> Added to Analysis 1 table with explanation of threshold artifact.
+- ~~Direction universality language too strong~~ -> Corrected: 0->1 direction is weakly aligned with later steps (cosine 0.18-0.37).
+- ~~Data quality concern about maxed-out generations~~ -> Filtered out 91 tasks where attempt 0 hit token limit.
 
-> **Layer 35 of Qwen3-4B carries a static, decodable signal about upcoming code correctness, including a reproducible geometric "about-to-succeed" direction — but the model does not iteratively follow this direction across repair attempts.**
+**Remaining gaps:**
+
+- Later-step analyses (1->2, 2->3, 3->4) have n_success = 2-13 — not independently load-bearing.
+- No comparison against simpler pre-generation baselines (e.g., token-level uncertainty) to contextualize the probe's performance.
+
+#### 5.4 Proposed unified insight (DRAFT — updated after data cleaning)
+
+> **Layer 35 of Qwen3-4B carries a static, decodable signal about upcoming code correctness, and the 0->1 repair transition has a characteristic geometric direction — but the model does not iteratively follow this direction across repair attempts.**
 >
-> - A linear probe on layer-35 hidden states at the moment the model finishes reading a prompt (attempt 0) predicts whether the upcoming generation will pass all tests, with AUC 0.927 raw / 0.879 after linearly removing prompt length. This replicates and strengthens Experiment 2 on 4.4x more data across the full LCB difficulty range, with a confound control that Experiment 2 did not have.
+> - A linear probe on layer-35 hidden states at the moment the model finishes reading a prompt (attempt 0) predicts whether the upcoming generation will pass all tests, with AUC 0.927 raw / 0.909 after linearly removing prompt length (prompt-only baseline: 0.786). This replicates and strengthens Experiment 2 on 4.4x more data across the full LCB difficulty range, with a formal confound control that Experiment 2 did not have. (Analyses 1, 14)
 >
-> - Beyond a static "will it work" signal, there is also a **repair-success direction**: when the model receives error feedback from a failed attempt, the contrastive shift `mean(h_next | next passes) - mean(h_next | next fails)` is a stable vector with non-random norm (permutation test p < 0.001 at 0->1, n=327) and with cosine similarity 0.83-0.88 between later repair steps in the PCA-reduced attempt-0 coordinate system. Individual pass deltas are longer projections along this direction than fail deltas (Cohen's d = 0.91). This suggests that the "moment the model understands the problem and is about to produce correct code" is accompanied by a characteristic, reproducible transformation of the hidden state — both in inclination (which direction it moves) and in magnitude (how far it moves).
+> - Beyond a static "will it work" signal, there is a **repair-success direction** at the 0->1 transition: on 236 clean tasks, the contrastive direction `mean(success_deltas) - mean(failure_deltas)` has norm 23.78 (p<0.001, ~10 sigma above null, Analysis 6). The direction's inclination is moderately stable across random data splits (split-half cosine 0.756, p<0.001, Analysis 16). The model has no memory between attempts — each attempt is a fresh forward pass on the repair prompt. The direction reflects the model's *comprehension* of the error feedback: when the feedback is informative enough to enable a fix, the hidden-state shift points in a characteristic direction. (Analyses 2, 6, 16)
 >
-> - However, this direction is **not a trajectory the model follows iteratively**. Consecutive repair steps within the same task are slightly anticorrelated in direction (cos ≈ -0.2 for both pass and fail trajectories), there is no distance-to-success convergence, and raw pass rates collapse after the first repair attempt (36% -> 7% -> 3% -> 1%). The error feedback appears to provide a one-shot benefit: the first repair attempt re-reads the problem with additional context and either lands in the success region or does not. Subsequent attempts do not compound.
+> - However, this direction is **not a trajectory the model follows iteratively**. Consecutive repair steps within the same task are slightly anticorrelated in direction (cos ~ -0.2 for both pass and fail trajectories), there is no distance-to-success convergence, and raw pass rates collapse after the first repair attempt (36% -> 7% -> 3% -> 1%). The error feedback appears to provide a one-shot benefit: the first repair attempt re-reads the problem with additional context and either lands in the success region or does not. Subsequent attempts do not compound. (Analyses 3, 9)
 >
 > - Together, Experiments 2 and 5 support a picture in which layer-35 of a 4B-parameter code model holds a *snapshot* representation of "is this code going to be correct," and the repair process is a discrete re-read with a characteristic activation-space shift — not a continuous reasoning trajectory. For practical inference-time scaling on models of this size, this would predict that investing in *the quality of the first error message* matters more than allowing many repair attempts.
-
-This draft insight matches the intuition you described: **the direction is present when the model is "about to produce correct code," it is different from the direction it takes when it is about to produce incorrect code, and this is what the model's hidden state encodes about its own understanding of the task.** It is important to be honest that we do NOT have evidence of iterative convergence or a coherent multi-step trajectory — only of a reproducible one-shot transformation, most strongly at the 0->1 step where the data is plentiful, and weakly supported at later steps where n is small but the geometric signature is consistent with the 0->1 direction.
 
 ---
 

@@ -29,6 +29,8 @@ import joblib
 import numpy as np
 from sklearn.model_selection import train_test_split
 
+from sklearn.linear_model import LinearRegression
+
 from reasoninglab.probing.data import ProbeSample, build_averaged_feature_matrix, build_feature_matrix, load_samples
 from reasoninglab.probing.probe import ProbeResult, train_probe
 
@@ -66,6 +68,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cross-domain", action="store_true", # default is False, but --cross-domain in the call by terminal is gonna be like is described in the help
         help="Train on HumanEval, test on LCB (instead of random stratified split).",
+    )
+    parser.add_argument(
+        "--residualize", action="store_true",
+        help="Residualize prompt_tokens out of hidden states before training. "
+             "Also trains a prompt-only baseline for comparison.",
     )
     return parser.parse_args()
 
@@ -120,6 +127,85 @@ def _print_results_table(results: list[ProbeResult]) -> None:
         )
     print("───────────────────────────────────────────────────────────────")
     print()
+
+
+# ── Residualization ──────────────────────────────────────────────────────────
+
+def _residualize(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    pt_train: np.ndarray,
+    pt_test: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Remove linear dependence on prompt_tokens from hidden states.
+
+    Fits a linear regression on the train set only, then subtracts the
+    predicted component from both train and test sets.
+    """
+    reg = LinearRegression()
+    reg.fit(pt_train.reshape(-1, 1), X_train)
+    X_train_resid = X_train - reg.predict(pt_train.reshape(-1, 1))
+    X_test_resid = X_test - reg.predict(pt_test.reshape(-1, 1))
+    return X_train_resid.astype(np.float32), X_test_resid.astype(np.float32)
+
+
+def _run_residualized_analysis(
+    train_samples: list[ProbeSample],
+    test_samples: list[ProbeSample],
+    layers: list[int],
+    args: argparse.Namespace,
+) -> list[ProbeResult]:
+    """Run probe with and without prompt-length residualization for comparison.
+
+    Trains three probes per layer:
+      1. Raw (unchanged) - for baseline comparison
+      2. Residualized - prompt_tokens regressed out
+      3. Prompt-only - just prompt_tokens as the feature (floor)
+    """
+    pt_train = np.array([s.prompt_tokens for s in train_samples], dtype=np.float32)
+    pt_test = np.array([s.prompt_tokens for s in test_samples], dtype=np.float32)
+
+    if pt_train.sum() == 0:
+        print("[probe] WARNING: all prompt_tokens are 0 -- "
+              "attempts.jsonl may be missing. Skipping residualization.")
+        return []
+
+    y_train = np.array([int(s.passed) for s in train_samples], dtype=np.int32)
+    y_test = np.array([int(s.passed) for s in test_samples], dtype=np.int32)
+
+    # Prompt-only baseline (single feature = prompt_tokens)
+    print("\n[probe] Prompt-only baseline:", flush=True)
+    prompt_only_result, _ = train_probe(
+        pt_train.reshape(-1, 1), y_train,
+        pt_test.reshape(-1, 1), y_test,
+        pca_variance=0.99,
+        cv_folds=args.cv_folds,
+        seed=args.seed,
+        layer_label="prompt_only",
+    )
+    print(f"  prompt_only: AUC={prompt_only_result.test_auc:.3f}")
+
+    resid_results: list[ProbeResult] = [prompt_only_result]
+
+    # Per-layer residualized probes
+    print("\n[probe] Residualized per-layer analysis:", flush=True)
+    for layer_idx in layers:
+        X_train, _ = build_feature_matrix(train_samples, layers=[layer_idx])
+        X_test, _ = build_feature_matrix(test_samples, layers=[layer_idx])
+        X_train_r, X_test_r = _residualize(X_train, X_test, pt_train, pt_test)
+
+        result, _ = train_probe(
+            X_train_r, y_train, X_test_r, y_test,
+            pca_variance=args.pca_variance,
+            cv_folds=args.cv_folds,
+            seed=args.seed,
+            layer_label=f"resid_{layer_idx}",
+        )
+        resid_results.append(result)
+        print(f"  resid_layer_{layer_idx}: AUC={result.test_auc:.3f} "
+              f"(PCA k={result.n_features_pca})", flush=True)
+
+    return resid_results
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -248,6 +334,15 @@ def main() -> None:
     # 5. Print results table.
     _print_results_table(all_results)
 
+    # 5b. Optional: residualized analysis.
+    resid_results: list[ProbeResult] = []
+    if args.residualize:
+        resid_results = _run_residualized_analysis(
+            train_samples, test_samples, layers, args)
+        if resid_results:
+            print("\n[probe] Residualized results:")
+            _print_results_table(resid_results)
+
     # 6. Save outputs.
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -277,6 +372,14 @@ def main() -> None:
     pipeline_path = out_dir / "probe_concat.joblib"
     joblib.dump(concat_pipeline, pipeline_path)
     print(f"[probe] Pipeline saved to {pipeline_path}")
+
+    if resid_results:
+        resid_metrics_path = out_dir / "metrics_residualized.json"
+        with resid_metrics_path.open("w", encoding="utf-8") as f:
+            records_r = [{k: int(v) if isinstance(v, np.integer) else float(v) if isinstance(v, np.floating) else v
+                        for k, v in asdict(r).items()} for r in resid_results]
+            json.dump(records_r, f, indent=2)
+        print(f"[probe] Residualized metrics saved to {resid_metrics_path}")
 
 
 if __name__ == "__main__":
