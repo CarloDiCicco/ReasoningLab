@@ -13,7 +13,7 @@ Runs two analyses:
 Usage:
     python scripts/train_probe.py runs/h2-baseline-probe-data_<ts>/hidden_states
     python scripts/train_probe.py runs/h2-baseline-probe-data_<ts>/hidden_states --pca-variance 0.99
-    python scripts/train_probe.py runs/h2-baseline-probe-data_<ts>/hidden_states --cross-domain
+    python scripts/train_probe.py runs/h2-baseline-probe-data_<ts>/hidden_states --residualize
 
 Requires: pip install -e ".[probe]"   (installs scikit-learn)
 """
@@ -64,10 +64,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed", type=int, default=0,
         help="Random seed for splits and CV (default: 0).",
-    )
-    parser.add_argument(
-        "--cross-domain", action="store_true", # default is False, but --cross-domain in the call by terminal is gonna be like is described in the help
-        help="Train on HumanEval, test on LCB (instead of random stratified split).",
     )
     parser.add_argument(
         "--residualize", action="store_true",
@@ -238,27 +234,17 @@ def main() -> None:
 
     _print_data_summary(samples, layers)
 
-    # 2. Train/test split.
-    if args.cross_domain:
-        # Train on HumanEval, test on LCB.
-        train_samples = [s for s in samples if s.source == "HumanEval"]
-        test_samples = [s for s in samples if s.source == "LCB"]
-        if not train_samples or not test_samples:
-            print("[probe] ERROR: cross-domain split has empty train or test set.")
-            return
-        print("[probe] Cross-domain split: train=HumanEval, test=LCB")
-    else:
-        # Stratified random split.
-        y_all = np.array([int(s.passed) for s in samples])
-        train_idx, test_idx = train_test_split(
-            np.arange(len(samples)),
-            test_size=args.test_size,
-            stratify=y_all,
-            random_state=args.seed,
-        )
-        train_samples = [samples[i] for i in train_idx]
-        test_samples = [samples[i] for i in test_idx]
-        print(f"[probe] Stratified random split (test_size={args.test_size}):")
+    # 2. Stratified random train/test split.
+    y_all = np.array([int(s.passed) for s in samples])
+    train_idx, test_idx = train_test_split(
+        np.arange(len(samples)),
+        test_size=args.test_size,
+        stratify=y_all,
+        random_state=args.seed,
+    )
+    train_samples = [samples[i] for i in train_idx]
+    test_samples = [samples[i] for i in test_idx]
+    print(f"[probe] Stratified random split (test_size={args.test_size}):")
 
     y_train_all = np.array([int(s.passed) for s in train_samples])
     y_test_all = np.array([int(s.passed) for s in test_samples])
