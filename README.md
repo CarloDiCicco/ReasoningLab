@@ -8,9 +8,9 @@ Mechanistic interpretability of code reasoning in Qwen3-4B-Instruct-25-07 LLM mo
 
 ## Summary
 
-- A linear probe on layer-35 hidden states predicts whether the model's next generation will pass unit tests **before a single output token is produced**, reaching **AUC 0.927** on the held-out test split. After linearly removing the effect of prompt length from the hidden state, AUC is 0.909; a prompt-length-only baseline scores 0.786. Trained and evaluated on 444 LiveCodeBench tasks spanning easy, medium, and hard difficulty.
-- At the first repair attempt, the hidden-state shift from attempt 0 to attempt 1 follows a **reproducible geometric direction** that distinguishes successful repairs from failed ones, on two independent tests: a magnitude test (the success-vs-failure mean difference has norm 23.78, ~10 standard deviations above a label-shuffled baseline whose mean is 9.07 and std is 1.43) and an inclination test (the direction recovered independently on each of 1000 random stratified half-splits agrees at a mean cosine of 0.756). Both tests significant at p < 0.001.
-- But this signal does **not** propagate into iterative refinement. Pass rates collapse after the first repair (15.8% → 36.4% → 6.7% → 2.7% → 1.4%), and later transitions have too few successful repairs (13, 4, 2) for any statistical test to recover a direction. No proper trajectory of repair, and no persistent "region of success" in activation space, was found in this study.
+- A linear probe on layer-35 hidden states predicts whether the model's next generation will pass unit tests **before a single output token is produced**, reaching a mean **test AUC of 0.917** (95% CI ±0.009) over 50 random 80/20 splits. After linearly removing the effect of prompt length from the hidden state, mean AUC is 0.889 (±0.012); a prompt-length-only baseline reaches 0.754 (±0.014). Trained and evaluated on 444 LiveCodeBench tasks spanning easy, medium, and hard difficulty.
+- At the first repair attempt, the hidden-state shift from attempt 0 to attempt 1 follows a **reproducible geometric direction** that distinguishes successful repairs from failed ones, on two independent tests: a magnitude test (success-vs-failure mean difference of norm 23.78, ~10 standard deviations above a label-shuffled baseline) and an inclination test (split-half cosine 0.756 over 1000 stratified halves, both p < 0.001). However, all three observable covariates differing between groups (attempt-0 code length, prompt-length growth, failure type) jointly explain most of this signal: after conditional residualization against them, the direction norm drops from 23.78 to 9.67 (p = 0.069) and the split-half cosine collapses to 0.181 (p = 0.857). The raw signal is therefore best read as a *correlate* of repair success, partially mediated by repair-context structure, not as evidence of an isolated repair-comprehension direction in activation space.
+- This signal also does **not** propagate into iterative refinement. Pass rates collapse after the first repair (15.8% → 36.4% → 6.7% → 2.7% → 1.4%), and later transitions have too few successful repairs (13, 4, 2) for any statistical test to recover a direction. No proper trajectory of repair, and no persistent "region of success" in activation space, was found in this study.
 
 ---
 
@@ -18,8 +18,7 @@ Mechanistic interpretability of code reasoning in Qwen3-4B-Instruct-25-07 LLM mo
 
 - **Model**: `Qwen/Qwen3-4B-Instruct-2507`
 - **Data**: 444 LiveCodeBench tasks (easy / medium / hard).
-- **Capture point**: layer 35 (penultimate decoder layer) hidden state vector, last prompt token, single forward pass on the prompt, before any generation.  Layer 35 was selected from an earlier layer sweep over layers 29–36 in which it was the consistent top performer on both AUC and F1.
-- **Pilot note**: an earlier pilot on a mixed HumanEval + LiveCodeBench dataset suggested this signal existed, but mixing benchmarks with very different pass rates (84.8% vs 16.5%) introduced a source confound (a predictor using the benchmark label alone reached AUC 0.844). The 444-task LCB-only study reported here is the clean replication.
+- **Capture point**: layer 35 (penultimate decoder layer) hidden state vector, last prompt token, single forward pass on the prompt, before any generation. Layer 35 was selected from an earlier layer sweep over layers 29–36 in which it was the consistent top performer on both AUC and F1.
 - **Hardware**: single laptop, RTX 4050 6 GB.
 - **Libraries**: `transformers`, `scikit-learn`, `numpy`.
 
@@ -29,7 +28,7 @@ Mechanistic interpretability of code reasoning in Qwen3-4B-Instruct-25-07 LLM mo
 
 The hidden state at the last prompt token already encodes information about whether the upcoming generation will be correct, before any code is produced.
 
-**Setup.** For each of the 444 LCB tasks, the layer-35 hidden state at the last prompt token is captured (one sample per task, so no task appears in both train and test, avoiding the inflated accuracy that would come from having multiple attempts of the same task split across sets). A standard three-step linear probe is trained on an 80/20 split (80% training, 20% held-out test), with 5-fold cross-validation run within the training portion only for hyperparameter selection (regularization strength C):
+**Setup.** For each of the 444 LCB tasks, the layer-35 hidden state at the last prompt token is captured (one sample per task, so no task appears in both train and test, avoiding the inflated accuracy that would come from having multiple attempts of the same task split across sets). A standard three-step linear probe is trained over **50 random 80/20 splits** (mean ± 95% CI reported below). On each split, 5-fold cross-validation runs within the training portion only for hyperparameter selection (regularization strength C):
 
 1. `StandardScaler` (fit on train only)
 2. `PCA` retaining 95% of variance (fit on train only)
@@ -37,13 +36,13 @@ The hidden state at the last prompt token already encodes information about whet
 
 Three variants:
 
-| Probe                                | Test AUC | CV AUC |
-|---                                   |---       |---     |
-| Raw hidden states                    | 0.927    | 0.923  |
-| Residualized (prompt length removed) | 0.909    | 0.888  |
-| Prompt length only (baseline)        | 0.786    | 0.746  |
+| Probe                                | Test AUC (mean ± 95% CI) | CV AUC (mean ± 95% CI) |
+|---                                   |---                       |---                     |
+| Raw hidden states                    | 0.917 ± 0.009            | 0.925 ± 0.003          |
+| Residualized (prompt length removed) | 0.889 ± 0.012            | 0.885 ± 0.005          |
+| Prompt length only (baseline)        | 0.754 ± 0.014            | 0.751 ± 0.004          |
 
-**Why residualize.** Prompt length is itself correlated with task difficulty in this dataset (longer prompts tend to be the harder LCB tasks), so a probe could in principle "cheat" by reading off how many prompt tokens went in rather than anything mechanistic about the model's internal state. The residualized variant linearly regresses each of the 2560 hidden-state dimensions on `prompt_tokens` (fit on train only), subtracts the prediction from both train and test, and trains the same probe on what's left. This removes the linear contribution of prompt length from every dimension. The prompt-only baseline goes one step further and asks how well a probe can do using `prompt_tokens` alone, i.e. how much of the raw probe's AUC could in principle be explained by length. The 0.786 floor and the residualized 0.909 together show the hidden state carries roughly **12 AUC points of signal beyond prompt length**, before any output token is sampled.
+**Why residualize.** Prompt length is itself correlated with task difficulty in this dataset (longer prompts tend to be the harder LCB tasks), so a probe could in principle "cheat" by reading off how many prompt tokens went in rather than anything mechanistic about the model's internal state. The residualized variant linearly regresses each of the 2560 hidden-state dimensions on `prompt_tokens` (fit on train only), subtracts the prediction from both train and test, and trains the same probe on what's left. This removes the linear contribution of prompt length from every dimension. The prompt-only baseline goes one step further and asks how well a probe can do using `prompt_tokens` alone, i.e. how much of the raw probe's AUC could in principle be explained by length. The 0.754 floor and the residualized 0.889 together show the hidden state carries roughly **14 AUC points of signal beyond prompt length**, before any output token is sampled.
 
 ---
 
@@ -57,15 +56,15 @@ Three variants:
 delta_i = hidden_state_layer35(attempt_1_i) − hidden_state_layer35(attempt_0_i)
 ```
 
-Each attempt is a **fresh forward pass** (the model has no state carried between attempts), so `delta_i` is entirely driven by what the model re-reads the second time: the failing code from attempt 0, plus the error message, plus the retry instruction. Split the deltas by whether attempt 1 passed, giving a success set (n = 128) and a failure set (n = 108) on 236 clean tasks (see *Data cleaning* below). The candidate direction is the contrastive mean difference:
+Each attempt is a **fresh forward pass** (the model has no state carried between attempts), so `delta_i` is entirely driven by what the model re-reads the second time: the failing code from attempt 0, plus the error message, plus the retry instruction. Split the deltas by whether attempt 1 passed, giving a success set (n = 128) and a failure set (n = 108) on 236 clean tasks. The candidate direction is the contrastive mean difference:
 
 ```
 v = mean(success_deltas) − mean(failure_deltas)
 ```
 
-**Why the contrastive construction is the appropriate one here.** Both groups read the same prompt template (problem + wrong code + error message + retry instruction), so the shared prompt-length and template components cancel in the difference `mean(success) − mean(failure)`. What survives is what differs between the two groups, which should be the repair-relevant signal.
+**Why the contrastive construction is the appropriate one here.** Both groups read the same prompt template (problem + wrong code + error message + retry instruction), so components that are equally distributed across the two groups cancel in the difference `mean(success) − mean(failure)`. What survives is whatever differs between the groups: potentially repair-relevant signal, but also any repair-context covariates that are not balanced between successes and failures.
 
-Two independent tests are run on `v`, in the full 2560-dimensional layer-35 space. Both compare the real result to a **null distribution** (what the same statistic would look like if the success/failure labels carried no information). The null is generated empirically by randomly shuffling the 128/108 labels across the 236 deltas (1000 times) and recomputing the statistic on each shuffle; the p-value is the fraction of shuffles whose statistic is at least as extreme as the real one.
+Two independent tests are run on `v`, in the full 2560-dimensional layer-35 space. Both compare the real result to an empirical **null distribution** (what the statistic would look like if the success/failure labels carried no information). For the magnitude test, the null is generated by shuffling the 128/108 labels across the 236 deltas 1000 times and recomputing the norm. For the inclination test, the real split-half cosine is compared against split-half cosines computed after shuffled-label assignments.
 
 | Test                                                          | Real value | Null distribution         | p-value  |
 |---                                                            |---         |---                        |---       |
@@ -76,13 +75,34 @@ The magnitude test asks whether the success/failure mean difference is larger th
 
 The inclination test asks: if the 236 deltas are randomly split into two halves (each preserving the original 128/108 success/failure ratio) and the direction `v` is recomputed independently on each half, do the two directions agree? Over 1000 random splits the average cosine is 0.756, meaning the two halves consistently discover the same direction. Under the null (shuffled labels), the same procedure averages to ≈ 0.
 
-**Data cleaning.** From the raw 327 0→1 transitions, 91 tasks are excluded in which attempt 0 hit the 768-token generation limit (the model fell into the endless repetition phenomenon, a well known failure mode for some Qwen models). In those cases the model produced long, truncated, syntactically broken code, which then gets pasted verbatim into the repair prompt for attempt 1, contaminating `delta` for the failure group (83 of those 91 fail at attempt 1). Final clean sample: 236 transitions (128 pass / 108 fail).
+**Sensitivity check: how much of this is driven by the repair context itself?**
+
+The contrastive construction `mean(success) − mean(failure)` automatically cancels any covariate that is *equally distributed* across the success and failure groups. Whether residualizing further is meaningful depends on whether candidate covariates actually differ between the two groups. Three covariates were checked:
+
+| Covariate                                       | Success mean (n=128) | Failure mean (n=108) | p-value  |
+|---                                              |---                   |---                   |---       |
+| `delta_prompt_tokens` (attempt 1 − attempt 0)   | 337.1                | 431.5                | < 0.001  |
+| `code_length_attempt_0` (completion tokens)     | 188.8                | 290.9                | < 0.001  |
+| `failure_type` of attempt 0                     | —                    | —                    | < 0.001  |
+
+All three differ significantly. Tasks that get repaired successfully tend to come from shorter, less messy attempt-0 code and a different distribution of failure types (more assertion errors, fewer runtime errors). The contrastive subtraction does *not* cancel these covariates, because they are not equally distributed across the two groups.
+
+Residualizing each of the 2560 hidden-state delta dimensions against a 4-column covariate matrix, fitted per-task: the two continuous variables (`delta_prompt_tokens`, `code_length_attempt_0`) plus 2 binary columns encoding `failure_type` (3 observed levels: assertion, runtime, syntax; one-hot with assertion as baseline, giving 2 dummy columns), then recomputing the direction:
+
+| Statistic                | Raw     | Conditional residualization |
+|---                       |---      |---                          |
+| Direction norm           | 23.78   | 9.67 (40.7% retained)       |
+| Permutation p-value      | < 0.001 | 0.069                       |
+| Split-half cosine        | 0.756   | 0.181                       |
+| Split-half p-value       | < 0.001 | 0.857                       |
+
+**The signal does not survive the full conditional residualization.** The residual direction is not statistically distinguishable from noise after controlling for the differentially-distributed observable covariates. This should not be read as the raw signal being "false": the raw direction passes both statistical tests by wide margins. 0 of 1000 permutations reached the real norm, and the split-half cosine (0.756) is far above the null mean (0.009). The honest reading: the observed geometric direction is a *correlate* of repair success, substantially mediated by what differs in the repair context (shorter wrong code → shorter repair prompt → different geometric shift), not evidence of an isolated repair-comprehension direction in activation space.
 
 ---
 
 ## A note on what repair looks like beyond the first attempt
 
-The Result 2 direction is statistically solid at the **first** repair step (0 → 1), where there are 128 successes and 108 failures, enough data for both the magnitude  and inclination tests. At later transitions (1→2, 2→3, 3→4), the number of successful repairs drops to **13, 4, and 2** respectively. With so few successes, no contrastive direction can be meaningfully estimated, regardless of whether one exists.
+The Result 2 direction is statistically solid at the **first** repair step (0 → 1), where there are 128 successes and 108 failures, enough data for both the magnitude and inclination tests. At later transitions (1→2, 2→3, 3→4), the number of successful repairs drops to **13, 4, and 2** respectively. With so few successes, no contrastive direction can be meaningfully estimated, regardless of whether one exists.
 
 Pass rates across the 5 attempts:
 
@@ -98,7 +118,7 @@ The bulk of the gain happens at attempt 1 and never recovers. The first piece of
 
 ---
 
-## What didn't work
+## Further null results
 
 - **Directional consistency across consecutive repair steps.** The cosine between `delta_{t→t+1}` and `delta_{t+1→t+2}` within the same trajectory averages to ≈ −0.14 (pass) and ≈ −0.23 (fail), slightly anti-correlated, despite the limited data at later steps.
 - **Distance-to-success-centroid.** Tracked the distance from each attempt's hidden state to the centroid of attempt-0 passing tasks; found no monotonic convergence for failing trajectories, as curves for pass and fail stay essentially parallel from attempt 1 onward.
@@ -112,10 +132,9 @@ ReasoningLab/
 ├── README.md                          ← this file
 ├── LICENSE                            ← Apache 2.0
 ├── scripts/
-│   ├── train_probe.py                 ← standalone probe trainer (layer sweeps, --residualize)
 │   ├── analyze_trajectories.py        ← all reported numbers: probe, direction, permutation, split-half, convergence
-│   ├── prepare_livecodebench.py       ← LCB data prep
-│   └── merge_trajectory_runs.py
+│   ├── train_probe.py                 ← standalone probe trainer (layer sweeps, --residualize)
+│   └── prepare_livecodebench.py       ← LCB data prep + utilities
 ├── src/reasoninglab/
 │   ├── probing/                       ← reusable probe + hidden-state utilities
 │   ├── policies/                      ← sampling / repair policies
@@ -124,8 +143,7 @@ ReasoningLab/
 │   └── models/                        ← model loading / hidden-state hooks
 ├── configs/h2/                        ← run configs for the reported experiments
 ├── runs/
-│   ├── h2-baseline-probe-data_20260314_132606/    ← earlier pilot hidden-state dump (mixed HE+LCB)
-│   └── h2-trajectory-all/                          ← 444-task 5-attempt LCB trajectory data (Results 1, 2, 3)
+│   └── h2-trajectory-all/                          ← 444-task 5-attempt LCB trajectory data (Results 1, 2)
 └── results/h2/
     ├── probe/metrics.json                         ← per-layer probe metrics
     └── trajectory_analysis/metrics.json           ← all direction / permutation / split-half metrics
