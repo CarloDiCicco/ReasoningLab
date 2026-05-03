@@ -29,6 +29,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
+from scipy import stats
 
 from reasoninglab.probing.data import _task_id_from_filename
 from reasoninglab.probing.probe import train_probe
@@ -2176,6 +2177,438 @@ def analysis_20_split_half_residualized(
     }
 
 
+# ── Analysis 21: Repeated-Splits Probe ──────────────────────────────────────
+
+def analysis_21_repeated_splits(
+    records: list[TrajectoryRecord],
+    n_splits: int = 50,
+) -> dict:
+    """Repeated-splits version of the residualized probe (paper-grade).
+
+    Runs the full pipeline (raw / residualized / prompt-only) on n_splits
+    random stratified 80/20 splits. Residualization is re-fit on each train
+    fold (no leakage). Reports mean, std, 95% CI, min, max for each pipeline.
+    """
+    _section(f"Analysis 21: Repeated-Splits Probe (n={n_splits})")
+
+    # Collect attempt-0 data once
+    X_list, y_list, pt_list = [], [], []
+    for rec in records:
+        att0 = rec.attempts[0]
+        X_list.append(att0.hidden_state)
+        y_list.append(int(att0.passed))
+        pt_list.append(att0.prompt_tokens)
+
+    X = np.stack(X_list).astype(np.float32)
+    y = np.array(y_list, dtype=np.int32)
+    pt = np.array(pt_list, dtype=np.float32)
+
+    print(f"  Total samples: {len(y)} (pass={y.sum()}, fail={(1-y).sum()})")
+
+    # Per-split metrics for each pipeline. Each list ends up length n_splits.
+    raw = {"test_auc": [], "cv_auc": [], "test_acc": [], "test_f1": []}
+    resid = {"test_auc": [], "cv_auc": [], "test_acc": [], "test_f1": []}
+    prompt = {"test_auc": [], "cv_auc": [], "test_acc": [], "test_f1": []}
+
+    def _record(bucket: dict, result) -> None:
+        bucket["test_auc"].append(float(result.test_auc))
+        bucket["cv_auc"].append(float(result.cv_auc_mean))
+        bucket["test_acc"].append(float(result.test_accuracy))
+        bucket["test_f1"].append(float(result.test_f1))
+
+    for seed in range(n_splits):
+        # Stratified 80/20 split with this seed
+        idx = np.arange(len(y))
+        train_idx, test_idx = train_test_split(
+            idx, test_size=0.2, stratify=y, random_state=seed)
+
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        pt_train, pt_test = pt[train_idx], pt[test_idx]
+
+        # 1. Raw probe
+        raw_result, _ = train_probe(
+            X_train, y_train, X_test, y_test,
+            pca_variance=0.95, cv_folds=5, seed=seed, layer_label=f"raw_s{seed}")
+        _record(raw, raw_result)
+
+        # 2. Residualized probe — re-fit residualization on this train fold
+        reg = LinearRegression()
+        reg.fit(pt_train.reshape(-1, 1), X_train)
+        X_train_r = (X_train - reg.predict(pt_train.reshape(-1, 1))).astype(np.float32)
+        X_test_r = (X_test - reg.predict(pt_test.reshape(-1, 1))).astype(np.float32)
+        resid_result, _ = train_probe(
+            X_train_r, y_train, X_test_r, y_test,
+            pca_variance=0.95, cv_folds=5, seed=seed, layer_label=f"resid_s{seed}")
+        _record(resid, resid_result)
+
+        # 3. Prompt-only baseline
+        prompt_result, _ = train_probe(
+            pt_train.reshape(-1, 1), y_train,
+            pt_test.reshape(-1, 1), y_test,
+            pca_variance=0.99, cv_folds=5, seed=seed, layer_label=f"po_s{seed}")
+        _record(prompt, prompt_result)
+
+        if (seed + 1) % 10 == 0:
+            print(f"  Completed {seed+1}/{n_splits} splits", flush=True)
+
+    def _summary(arr: list[float]) -> dict:
+        a = np.array(arr)
+        return {
+            "mean": float(a.mean()),
+            "std": float(a.std(ddof=1)),
+            "ci95_half": float(1.96 * a.std(ddof=1) / np.sqrt(len(a))),
+            "min": float(a.min()),
+            "max": float(a.max()),
+        }
+
+    def _summarize_bucket(bucket: dict) -> dict:
+        out = {k + "_summary": _summary(v) for k, v in bucket.items()}
+        out.update({k + "_per_split": v for k, v in bucket.items()})
+        return out
+
+    raw_out = _summarize_bucket(raw)
+    resid_out = _summarize_bucket(resid)
+    prompt_out = _summarize_bucket(prompt)
+
+    def _line(name: str, summary: dict, label: str) -> str:
+        s = summary[label + "_summary"]
+        return (f"  {name}  {label.replace('_', ' '):>10s}: "
+                f"mean={s['mean']:.3f}  +/-{s['ci95_half']:.3f} (95% CI)  "
+                f"std={s['std']:.3f}  min={s['min']:.3f}  max={s['max']:.3f}")
+
+    for name, out in [("Raw           ", raw_out),
+                      ("Residualized  ", resid_out),
+                      ("Prompt-only   ", prompt_out)]:
+        print(_line(name, out, "test_auc"))
+        print(_line(name, out, "cv_auc"))
+        print(_line(name, out, "test_acc"))
+        print(_line(name, out, "test_f1"))
+
+    return {
+        "n_splits": n_splits,
+        "raw": raw_out,
+        "residualized": resid_out,
+        "prompt_only": prompt_out,
+    }
+
+
+# ── Analysis 22: Conditional Sensitivity (covariate check + residualization) ─
+
+def _collect_transition_deltas_with_covariates(
+    records: list[TrajectoryRecord],
+    trans_idx: int = 0,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Same filter as `_collect_transition_deltas` but also returns covariates.
+
+    Returns (deltas, labels, covariates) where covariates is a dict with:
+      - delta_prompt_tokens (float array, len N)
+      - code_length_attempt_0 (float array, len N)
+      - failure_type_attempt_0 (str array, len N)
+
+    Filter logic must match `_collect_transition_deltas` exactly to keep the
+    same 236 clean tasks (128/108).
+    """
+    deltas: list[np.ndarray] = []
+    labels: list[bool] = []
+    delta_pts: list[float] = []
+    code_len_0: list[float] = []
+    failure_types_0: list[str] = []
+
+    for rec in records:
+        if rec.is_repetition_loop:
+            continue
+        if len(rec.attempts) <= trans_idx + 1:
+            continue
+        curr = rec.attempts[trans_idx]
+        nxt = rec.attempts[trans_idx + 1]
+        if curr.passed:
+            continue
+        if curr.completion_tokens == TOKEN_LIMIT:
+            continue
+        deltas.append(nxt.hidden_state - curr.hidden_state)
+        labels.append(nxt.passed)
+        delta_pts.append(float(nxt.prompt_tokens - curr.prompt_tokens))
+        code_len_0.append(float(curr.completion_tokens))
+        failure_types_0.append(curr.failure_type)
+
+    deltas_arr = np.stack(deltas).astype(np.float32)
+    labels_arr = np.array(labels)
+    covariates = {
+        "delta_prompt_tokens": np.array(delta_pts, dtype=np.float32),
+        "code_length_attempt_0": np.array(code_len_0, dtype=np.float32),
+        "failure_type_attempt_0": np.array(failure_types_0),
+    }
+    return deltas_arr, labels_arr, covariates
+
+
+def _build_covariate_matrix(
+    covariates_to_use: dict,
+    failure_types: np.ndarray | None = None,
+) -> np.ndarray:
+    """Stack continuous covariates and one-hot encode failure_type if present.
+
+    Drops one failure_type level as baseline (the most frequent).
+    """
+    cols = []
+    for v in covariates_to_use.values():
+        if v.ndim == 1:
+            cols.append(v.reshape(-1, 1))
+        else:
+            cols.append(v)
+    if failure_types is not None:
+        # one-hot, drop most frequent level as baseline
+        unique, counts = np.unique(failure_types, return_counts=True)
+        baseline = unique[np.argmax(counts)]
+        for level in unique:
+            if level == baseline:
+                continue
+            cols.append((failure_types == level).astype(np.float32).reshape(-1, 1))
+    return np.hstack(cols).astype(np.float32)
+
+
+def analysis_22_conditional_sensitivity(
+    records: list[TrajectoryRecord],
+    seed: int,
+    output_dir: Path,
+    alpha: float = 0.05,
+) -> dict:
+    """Sensitivity analysis: covariate-distribution check + conditional residualization.
+
+    Step 22a: For each candidate covariate, test whether its distribution
+    differs between the success group and the failure group on the 236 clean
+    0->1 transitions. Welch's t-test for continuous, chi-squared for categorical.
+
+    Step 22b: Residualize ONLY against covariates flagged "differs" at alpha.
+    Rationale: the contrastive construction mean(success) - mean(failure)
+    already cancels equally-distributed covariates. Residualizing against a
+    covariate that does not differ between groups risks double-correcting
+    (collapses signal artifactually).
+
+    Step 22c: Recompute direction norm + permutation + split-half on
+    residualized deltas (or raw if no covariates differ).
+    """
+    _section("Analysis 22: Conditional Sensitivity (covariate check + cond. residualization)")
+
+    deltas, labels, covs = _collect_transition_deltas_with_covariates(records, trans_idx=0)
+    n_succ = int(labels.sum())
+    n_fail = len(labels) - n_succ
+    print(f"  Clean 0->1 deltas: N={len(labels)}  success={n_succ}  failure={n_fail}")
+
+    # ---- Step 22a: covariate-distribution check ----
+    print("\n  Step 22a — Covariate-distribution check (success vs failure groups):")
+
+    cov_results: dict = {}
+
+    # delta_prompt_tokens
+    s_vals = covs["delta_prompt_tokens"][labels]
+    f_vals = covs["delta_prompt_tokens"][~labels]
+    t_stat, p_val = stats.ttest_ind(s_vals, f_vals, equal_var=False)
+    cov_results["delta_prompt_tokens"] = {
+        "test": "welch_t",
+        "t_stat": float(t_stat),
+        "p_value": float(p_val),
+        "mean_success": float(s_vals.mean()),
+        "mean_failure": float(f_vals.mean()),
+        "std_success": float(s_vals.std(ddof=1)),
+        "std_failure": float(f_vals.std(ddof=1)),
+        "differs": bool(p_val < alpha),
+    }
+    print(f"    delta_prompt_tokens: "
+          f"mean_succ={s_vals.mean():.1f}  mean_fail={f_vals.mean():.1f}  "
+          f"t={t_stat:.2f}  p={p_val:.4f}  "
+          f"differs={cov_results['delta_prompt_tokens']['differs']}")
+
+    # code_length_attempt_0
+    s_vals = covs["code_length_attempt_0"][labels]
+    f_vals = covs["code_length_attempt_0"][~labels]
+    t_stat, p_val = stats.ttest_ind(s_vals, f_vals, equal_var=False)
+    cov_results["code_length_attempt_0"] = {
+        "test": "welch_t",
+        "t_stat": float(t_stat),
+        "p_value": float(p_val),
+        "mean_success": float(s_vals.mean()),
+        "mean_failure": float(f_vals.mean()),
+        "std_success": float(s_vals.std(ddof=1)),
+        "std_failure": float(f_vals.std(ddof=1)),
+        "differs": bool(p_val < alpha),
+    }
+    print(f"    code_length_attempt_0: "
+          f"mean_succ={s_vals.mean():.1f}  mean_fail={f_vals.mean():.1f}  "
+          f"t={t_stat:.2f}  p={p_val:.4f}  "
+          f"differs={cov_results['code_length_attempt_0']['differs']}")
+
+    # failure_type (chi-squared on 4x2 contingency)
+    ft = covs["failure_type_attempt_0"]
+    levels = np.unique(ft)
+    contingency = np.array([
+        [int(((ft == lv) & labels).sum()), int(((ft == lv) & ~labels).sum())]
+        for lv in levels
+    ])
+    chi2, p_val_chi, dof, expected = stats.chi2_contingency(contingency)
+    cov_results["failure_type_attempt_0"] = {
+        "test": "chi2",
+        "chi2": float(chi2),
+        "dof": int(dof),
+        "p_value": float(p_val_chi),
+        "levels": levels.tolist(),
+        "contingency_success": contingency[:, 0].tolist(),
+        "contingency_failure": contingency[:, 1].tolist(),
+        "differs": bool(p_val_chi < alpha),
+    }
+    print(f"    failure_type_attempt_0: levels={levels.tolist()}  "
+          f"chi2={chi2:.2f}  dof={dof}  p={p_val_chi:.4f}  "
+          f"differs={cov_results['failure_type_attempt_0']['differs']}")
+
+    # ---- Step 22b: build conditional covariate matrix ----
+    print("\n  Step 22b — Building conditional covariate matrix:")
+    continuous_to_use = {}
+    if cov_results["delta_prompt_tokens"]["differs"]:
+        continuous_to_use["delta_prompt_tokens"] = covs["delta_prompt_tokens"]
+        print("    INCLUDE: delta_prompt_tokens")
+    else:
+        print("    EXCLUDE: delta_prompt_tokens (no group difference)")
+    if cov_results["code_length_attempt_0"]["differs"]:
+        continuous_to_use["code_length_attempt_0"] = covs["code_length_attempt_0"]
+        print("    INCLUDE: code_length_attempt_0")
+    else:
+        print("    EXCLUDE: code_length_attempt_0 (no group difference)")
+    use_failure_type = cov_results["failure_type_attempt_0"]["differs"]
+    if use_failure_type:
+        print("    INCLUDE: failure_type_attempt_0 (one-hot, baseline = most frequent)")
+    else:
+        print("    EXCLUDE: failure_type_attempt_0 (no group difference)")
+
+    n_covariates = len(continuous_to_use) + (
+        len(np.unique(covs["failure_type_attempt_0"])) - 1 if use_failure_type else 0
+    )
+    print(f"    Total covariate columns: {n_covariates}")
+
+    # ---- Step 22c: residualize (or skip) and recompute ----
+    if n_covariates == 0:
+        print("\n  Step 22c — No covariates differ: residualization is unwarranted.")
+        print("    The raw direction (Analysis 6) stands as the result.")
+        return {
+            "covariate_check": cov_results,
+            "covariates_used": [],
+            "n_covariate_columns": 0,
+            "residualization_performed": False,
+            "n_success": n_succ,
+            "n_failure": n_fail,
+        }
+
+    print("\n  Step 22c — Per-dimension OLS, subtract, recompute direction stats")
+    cov_matrix = _build_covariate_matrix(
+        continuous_to_use,
+        failure_types=covs["failure_type_attempt_0"] if use_failure_type else None,
+    )
+    print(f"    Covariate matrix shape: {cov_matrix.shape}")
+
+    # Raw norm for comparison
+    mean_s_raw = deltas[labels].mean(axis=0)
+    mean_f_raw = deltas[~labels].mean(axis=0)
+    raw_norm = float(np.linalg.norm(mean_s_raw - mean_f_raw))
+    print(f"    Raw direction norm: {raw_norm:.2f}")
+
+    # Per-dimension OLS, subtract
+    reg = LinearRegression()
+    reg.fit(cov_matrix, deltas)
+    deltas_resid = (deltas - reg.predict(cov_matrix)).astype(np.float32)
+
+    mean_s = deltas_resid[labels].mean(axis=0)
+    mean_f = deltas_resid[~labels].mean(axis=0)
+    resid_norm = float(np.linalg.norm(mean_s - mean_f))
+    print(f"    Residualized direction norm: {resid_norm:.2f}  "
+          f"(retention {resid_norm/raw_norm:.1%})")
+
+    # Permutation test on residualized deltas
+    rng = np.random.default_rng(seed)
+    n_perms = 1000
+    perm_norms = np.empty(n_perms)
+    for i in range(n_perms):
+        shuffled = rng.permutation(labels)
+        ms = deltas_resid[shuffled].mean(axis=0)
+        mf = deltas_resid[~shuffled].mean(axis=0)
+        perm_norms[i] = np.linalg.norm(ms - mf)
+    p_norm = float((perm_norms >= resid_norm).mean())
+    print(f"    Permutation test (residualized): "
+          f"p={p_norm:.4f}  null mean={perm_norms.mean():.2f}  "
+          f"null std={perm_norms.std():.2f}  null max={perm_norms.max():.2f}")
+
+    # Split-half stability on residualized deltas
+    n_splits_sh = 1000
+    sss = StratifiedShuffleSplit(n_splits=n_splits_sh, test_size=0.5, random_state=seed)
+    real_cosines = np.empty(n_splits_sh)
+    for i, (a_idx, b_idx) in enumerate(sss.split(np.zeros(len(labels)), labels.astype(int))):
+        a_lab, b_lab = labels[a_idx], labels[b_idx]
+        v_a = deltas_resid[a_idx][a_lab].mean(axis=0) - deltas_resid[a_idx][~a_lab].mean(axis=0)
+        v_b = deltas_resid[b_idx][b_lab].mean(axis=0) - deltas_resid[b_idx][~b_lab].mean(axis=0)
+        real_cosines[i] = float(np.dot(v_a, v_b) / (np.linalg.norm(v_a) * np.linalg.norm(v_b)))
+
+    # Null: shuffle labels, then split
+    rng = np.random.default_rng(seed + 1)
+    null_cosines = np.empty(n_splits_sh)
+    sss_null = StratifiedShuffleSplit(n_splits=n_splits_sh, test_size=0.5, random_state=seed+2)
+    shuffled_labels = rng.permutation(labels)
+    for i, (a_idx, b_idx) in enumerate(sss_null.split(np.zeros(len(labels)), shuffled_labels.astype(int))):
+        a_lab = shuffled_labels[a_idx]
+        b_lab = shuffled_labels[b_idx]
+        v_a = deltas_resid[a_idx][a_lab].mean(axis=0) - deltas_resid[a_idx][~a_lab].mean(axis=0)
+        v_b = deltas_resid[b_idx][b_lab].mean(axis=0) - deltas_resid[b_idx][~b_lab].mean(axis=0)
+        null_cosines[i] = float(np.dot(v_a, v_b) / (np.linalg.norm(v_a) * np.linalg.norm(v_b)))
+
+    p_cos = float((null_cosines >= real_cosines.mean()).mean())
+    print(f"    Split-half cosine (residualized): "
+          f"mean={real_cosines.mean():.3f}  std={real_cosines.std():.3f}  "
+          f"min={real_cosines.min():.3f}  max={real_cosines.max():.3f}  "
+          f"null mean={null_cosines.mean():.3f}  p={p_cos:.4f}")
+
+    # Histogram of permutation test
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(perm_norms, bins=50, color="#95a5a6", alpha=0.7,
+            label="Permuted (residualized)")
+    ax.axvline(resid_norm, color="#e74c3c", linewidth=2,
+               label=f"Real norm = {resid_norm:.2f}")
+    ax.set_xlabel("||mean_success - mean_failure|| (residualized, conditional)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Analysis 22: Conditional Sensitivity (p={p_norm:.4f})")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(output_dir / "analysis22_conditional_permtest.png", dpi=150)
+    plt.close(fig)
+    print(f"    Saved: {output_dir / 'analysis22_conditional_permtest.png'}")
+
+    return {
+        "covariate_check": cov_results,
+        "covariates_used": list(continuous_to_use.keys()) +
+                          (["failure_type_attempt_0"] if use_failure_type else []),
+        "n_covariate_columns": int(cov_matrix.shape[1]),
+        "residualization_performed": True,
+        "raw_norm": raw_norm,
+        "residualized_norm": resid_norm,
+        "norm_retention": resid_norm / raw_norm,
+        "permutation": {
+            "p_value": p_norm,
+            "null_mean": float(perm_norms.mean()),
+            "null_std": float(perm_norms.std()),
+            "null_max": float(perm_norms.max()),
+            "n_permutations": n_perms,
+        },
+        "split_half": {
+            "real_cosine_mean": float(real_cosines.mean()),
+            "real_cosine_std": float(real_cosines.std()),
+            "real_cosine_min": float(real_cosines.min()),
+            "real_cosine_max": float(real_cosines.max()),
+            "null_cosine_mean": float(null_cosines.mean()),
+            "null_cosine_std": float(null_cosines.std()),
+            "p_value": p_cos,
+            "n_splits": n_splits_sh,
+        },
+        "n_success": n_succ,
+        "n_failure": n_fail,
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _make_serializable(obj: object) -> object:
@@ -2295,6 +2728,14 @@ def main() -> None:
 
     # ---- Analysis 20: split-half stability (residualized) ----
     all_metrics["split_half_residualized"] = analysis_20_split_half_residualized(
+        records, SEED, OUTPUT_DIR)
+
+    # ---- Analysis 21: repeated-splits probe (paper-grade Result 1) ----
+    all_metrics["repeated_splits_probe"] = analysis_21_repeated_splits(
+        records, n_splits=50)
+
+    # ---- Analysis 22: conditional sensitivity (covariate check + cond. resid.) ----
+    all_metrics["analysis_22_sensitivity_v2"] = analysis_22_conditional_sensitivity(
         records, SEED, OUTPUT_DIR)
 
     # ---- Save all numerical metrics to JSON ----
