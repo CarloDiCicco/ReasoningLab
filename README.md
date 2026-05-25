@@ -98,6 +98,8 @@ Residualizing each of the 2560 hidden-state delta dimensions against a 4-column 
 
 **The signal does not survive the full conditional residualization.** The residual direction is not statistically distinguishable from noise after controlling for the differentially-distributed observable covariates. This should not be read as the raw signal being "false": the raw direction passes both statistical tests by wide margins. 0 of 1000 permutations reached the real norm, and the split-half cosine (0.756) is far above the null mean (0.009). The honest reading: the observed geometric direction is a *correlate* of repair success, substantially mediated by what differs in the repair context (shorter wrong code → shorter repair prompt → different geometric shift), not evidence of an isolated repair-comprehension direction in activation space.
 
+**Note.** The two continuous covariates partially overlap in information content: `delta_prompt_tokens` contains `code_length_attempt_0` (Pearson r = 0.995); the resulting overfitting bias is well under one percentage point of in-sample R², because the parameter-to-data ratio is only 4/236 ≈ 1.7%.
+
 ---
 
 ## A note on what repair looks like beyond the first attempt
