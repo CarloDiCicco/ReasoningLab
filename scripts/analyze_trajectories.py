@@ -39,7 +39,7 @@ from reasoninglab.probing.probe import train_probe
 # Hardcoded paths and parameters. Change these when running on different data.
 
 RUN_DIR = Path("runs\h2-trajectory-all")
-LAYER = 35          # Penultimate decoder block — best signal from prior probe analysis
+LAYER = 29          # Upper decoder block selected by nested CV (see paper / probe analysis)
 OUTPUT_DIR = Path("results/h2/trajectory_analysis")
 SEED = 0
 TOKEN_LIMIT = 768   # max_new_tokens from config — used to detect repetition loops
