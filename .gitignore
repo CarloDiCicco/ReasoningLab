@@ -221,3 +221,17 @@ results/h2/**/*.joblib
 # Local model/offload artifacts
 offload_*/
 RESEARCH_LOG.md
+
+# LaTeX build artifacts
+paper/*.pdf
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.bbl
+paper/*.blg
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+
+.claude
