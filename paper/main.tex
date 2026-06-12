@@ -1,0 +1,43 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[expansion=false]{microtype}
+\usepackage[numbers]{natbib}
+\usepackage{placeins}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=blue,
+    urlcolor=blue,
+}
+
+\title{\textbf{Code Correctness Signals in LLM Hidden States: Pre-Generation Probing and Repair Geometry}}
+\author{Carlo Di Cicco\thanks{Independent researcher. Contact: \texttt{cdicicco2001@gmail.com}. Code, data, and analysis scripts: \url{https://github.com/CarloDiCicco/ReasoningLab}}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language models encode rich information in their hidden states. This work asks whether code correctness is legible in the hidden states of Qwen3-4B-Instruct-2507, before it generates and as it repairs a failed attempt, studied on 444 LiveCodeBench tasks. It reports two findings connected by a single confound-control tool: residualization. First, the correctness of the model's first-attempt code is linearly decodable from the prompt-final hidden state, with a leakage-free held-out AUC of $0.931 \pm 0.008$ across 50 outer splits. After the linear effect of prompt length is removed from each hidden state dimension, the probe still reaches $0.911 \pm 0.010$, well above a prompt-length baseline of $0.754 \pm 0.014$. Second, on 236 cleaned cases where the model attempts to repair a failed first attempt, the hidden state shift from the failing attempt to its repair carries a statistically detectable contrastive direction, significant on both a magnitude and a split-half test against label-shuffled nulls. This direction does not survive a conditional residualization against repair-context covariates that differ between successful and failed repairs, marking it as a correlate of repair success driven by the repair context rather than an isolated repair-comprehension feature. The probe layer is selected by nested cross-validation, and the same residualization approach that upholds the pre-generation correctness result overturns the repair-direction interpretation. The contribution is as much methodological as empirical: a diagnostic honest enough to report a negative result alongside a positive one.
+\end{abstract}
+
+\input{sections/01_introduction}
+\input{sections/02_setup}
+\input{sections/03_probe_results}
+\input{sections/04_repair_geometry}
+\input{sections/05_limitations}
+\input{sections/06_conclusion}
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}

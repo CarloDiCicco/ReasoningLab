@@ -1,0 +1,18 @@
+\section{Limitations and further null results}
+\label{sec:limitations}
+
+The following reports the constraints of the study and two additional trajectory-level analyses whose outcomes do not support clean claims either way. For these analyses, the distinction between "the signal does not exist" and "the data were not sufficient to detect it" cannot be resolved with the present dataset.
+
+\begin{itemize}
+    \item \textbf{Single model.} All experiments use Qwen3-4B-Instruct-2507, run locally on a single GPU. Replicating across model families would require substantially more inference compute and time; this is left for future work.
+
+    \item \textbf{Captured layer range.} The probe AUC peaks at the shallowest captured layer, layer 29, with layer 30 statistically indistinguishable. Because the peak sits at the lower edge of the captured range rather than in its interior, a layer below 29 cannot be ruled out as comparable or better. The repair-direction conclusion is, however, stable across the captured range: re-running the Section~\ref{sec:repair_geometry} analysis at layers 29, 30, and 35 yields the same verdict, making it unlikely, though unproven, that a nearby lower layer would change it.
+
+    \item \textbf{Data starvation at later repair transitions.} The $1 \to 2$, $2 \to 3$, and $3 \to 4$ transitions have only $13$, $4$, and $2$ successful repairs respectively. No contrastive direction can be meaningfully estimated at those steps, so trajectory-level claims beyond the $0 \to 1$ transition are out of scope.
+
+    \item \textbf{Covariate-set composition.} The conditional residualization in Section~\ref{sec:repair_geometry} uses two continuous covariates that share information: $\Delta\texttt{prompt\_tokens}$ contains $\texttt{code\_length\_attempt\_0}$, with Pearson $r = 0.995$. The redundant covariate is a single parameter against 236 data points, so the resulting overfitting bias is negligible; see the disclosure paragraph at the end of Section~\ref{sec:repair_geometry} for the empirical justification. A cleaner covariate set would avoid the overlap, but it could not be computed from the retained logs without re-running inference on all 444 tasks, which was beyond the compute available for this study.
+
+    \item \textbf{Directional consistency across repair steps.} The cosine between $\delta_{t \to t+1}$ and $\delta_{t+1 \to t+2}$ within the same trajectory averages to approximately $-0.16$ for eventually-passing tasks and $-0.25$ for eventually-failing tasks, slightly anti-correlated in both cases. With so few successful repairs at later transitions, it is not possible to distinguish a genuine absence of directional consistency from insufficient data.
+
+    \item \textbf{Distance to the success region.} Tracking the distance from each attempt's hidden state to the centroid of attempt-0 passing tasks, the ``success region'', shows no monotonic convergence: the distance curves for eventually-passing and eventually-failing tasks track each other closely from attempt 1 onward, with neither approaching the success region.
+\end{itemize}
