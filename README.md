@@ -1,6 +1,6 @@
 # Code Correctness Signals in LLM Hidden States: Pre-Generation Probing and Repair Geometry
 
-**Paper:** arXiv link forthcoming.
+**Paper:** [arXiv:2606.14530](https://arxiv.org/abs/2606.14530)
 
 **What this studies.** Large language models process text through stacked transformer layers, each producing a hidden state vector that numerically represents the input so far. This study reads the hidden state at the last prompt token of Qwen3-4B-Instruct-2507, captured on a single forward pass over the prompt before any output token is generated, and asks two questions. First, before the model writes anything, can the hidden state already predict whether the code it is about to generate will pass? Second, when the model is given a chance to repair a failed attempt, does the shift in its hidden state from the failed attempt to the repair carry a stable signature of whether the repair will succeed? The specific layer used is layer 29, an upper transformer block selected by nested cross-validation (CV) as described in Result 1, and all reported analyses use that layer.
 
