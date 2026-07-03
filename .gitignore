@@ -234,4 +234,4 @@ paper/*.fls
 paper/*.fdb_latexmk
 paper/*.synctex.gz
 
-.claude
+.claudedata/lcb_all_FIXED.jsonl

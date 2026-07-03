@@ -31,9 +31,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import json
+import pickle
 import re
 import textwrap
+import zlib
 from pathlib import Path
 
 
@@ -117,26 +120,53 @@ def _parse_starter_code(starter_code: str) -> tuple[str, str] | None:
 
 
 def _parse_test_cases(test_cases_json: str) -> list[dict]:
-    """Parse test case JSON string into a list of {input, output} dicts.
+    """Parse a LCB test-case field into a list of {input, output} dicts.
 
-    LCB stores test cases as a JSON string.  The format varies:
-      - List of dicts: [{"input": "...", "output": "..."}, ...]
-      - Single dict:   {"input": "...", "output": "..."}
+    LiveCodeBench stores test cases in TWO different encodings, and which one
+    a given field uses is not obvious from the field name:
+      - Plain JSON string: '[{"input": "...", "output": "..."}, ...]' — the
+        format `public_test_cases` always uses.
+      - base64(zlib(pickle(json_string))) — the format the LARGER
+        `private_test_cases` payloads use (LCB compresses these; the small
+        public sets it leaves as plain JSON).
+
+    An earlier version of this function called json.loads() directly and
+    treated a JSONDecodeError as "no tests" (returning []). Because
+    private_test_cases is compressed for essentially every problem, that
+    silently discarded the entire private test pool — the majority of each
+    task's grading tests — while the code appeared to succeed. This function
+    now decodes both encodings so the full public+private pool is recovered.
+
+    A genuinely un-decodable payload raises ValueError (NOT a silent []), so a
+    real parsing failure can never again masquerade as "this task simply had
+    no tests". Callers distinguish an empty field (returns []) from a broken
+    one (raises) explicitly.
     """
-    # Some rows have missing/empty test payloads.
+    # A genuinely empty/missing field is a valid, distinct state — not an error.
     if not test_cases_json or test_cases_json.strip() == "":
         return []
+
+    parsed = None
+    # 1) Plain JSON (public_test_cases, and some private ones).
     try:
         parsed = json.loads(test_cases_json)
     except json.JSONDecodeError:
-        return []
+        # 2) base64(zlib(pickle(json_string))) — the compressed private form.
+        try:
+            decompressed = zlib.decompress(base64.b64decode(test_cases_json))
+            parsed = json.loads(pickle.loads(decompressed))
+        except Exception as exc:  # noqa: BLE001 - decode-path failures are all fatal here
+            raise ValueError(
+                "test-case payload is neither plain JSON nor "
+                "base64(zlib(pickle(...))); refusing to silently drop it"
+            ) from exc
 
     # Normalize both accepted shapes to a list for downstream iteration.
     if isinstance(parsed, dict):
         return [parsed]
     if isinstance(parsed, list):
         return parsed
-    return []
+    raise ValueError(f"decoded test-case payload has unexpected type {type(parsed)!r}")
 
 
 def _build_assertion(method_call: str, expected_output: str) -> str:
@@ -162,16 +192,23 @@ def _build_assertion(method_call: str, expected_output: str) -> str:
     return f"assert {method_call} == {repr(expected)}"
 
 
-def _convert_problem(problem: dict) -> dict | None:
+def _convert_problem(problem: dict) -> tuple[dict | None, int, int]:
     """Convert one LCB LeetCode problem to ReasoningLab TaskRecord format.
 
-    Returns None if the problem cannot be converted (e.g., unrecognized
-    starter_code format or no test cases).
+    Returns a (record, n_decoded, n_usable) tuple:
+      - record:    the TaskRecord dict, or None if the problem cannot be
+                   converted (unrecognized starter_code, or no usable tests).
+      - n_decoded: how many test cases were decoded from public+private pools.
+      - n_usable:  how many of those became runnable assertions (n_decoded
+                   minus test cases whose input/output could not be parsed).
+
+    The (n_decoded, n_usable) counts let the caller report per-task and total
+    test-case loss transparently, instead of silently dropping edge cases.
     """
     starter_code = problem.get("starter_code", "")
     parsed = _parse_starter_code(starter_code)
     if parsed is None:
-        return None
+        return None, 0, 0
 
     class_name, method_name = parsed
 
@@ -190,9 +227,10 @@ def _convert_problem(problem: dict) -> dict | None:
     public_tests = _parse_test_cases(problem.get("public_test_cases", ""))
     private_tests = _parse_test_cases(problem.get("private_test_cases", ""))
     all_tests = public_tests + private_tests
+    n_decoded = len(all_tests)
 
     if not all_tests:
-        return None
+        return None, 0, 0
 
     # Build assertion-style test_code.
     # LeetCode test inputs are typically formatted as one value per line,
@@ -223,8 +261,9 @@ def _convert_problem(problem: dict) -> dict | None:
         except Exception:
             continue
 
+    n_usable = len(assertions)
     if not assertions:
-        return None
+        return None, n_decoded, 0
 
     # Build test code executed by the verifier:
     # 1) instantiate Solution-like class
@@ -235,13 +274,14 @@ def _convert_problem(problem: dict) -> dict | None:
 
     question_id = problem.get("question_id", problem.get("question_title", "unknown"))
 
-    return {
+    record = {
         "task_id": f"LCB/{question_id}",
         "prompt": prompt,
         "test_code": test_code,
         "entrypoint": method_name,
         "timeout_s": 10.0,  # LCB problems can be more complex → slightly longer timeout
     }
+    return record, n_decoded, n_usable
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -308,15 +348,35 @@ def main() -> None:
     # Convert raw dataset rows to ReasoningLab task records.
     records: list[dict] = []
     skipped = 0
+    total_decoded = 0          # test cases decoded across all converted tasks
+    total_usable = 0           # of those, how many became runnable assertions
+    tasks_with_tc_loss = 0     # tasks that lost >=1 test case to input parsing
     for p in filtered:
-        record = _convert_problem(p)
+        record, n_decoded, n_usable = _convert_problem(p)
         if record is not None:
             records.append(record)
+            total_decoded += n_decoded
+            total_usable += n_usable
+            if n_usable < n_decoded:
+                tasks_with_tc_loss += 1
         else:
             skipped += 1
 
     if skipped > 0:
         print(f"  Skipped {skipped} problems (unparseable format).", flush=True)
+
+    # Report test-case coverage transparently. The whole point of this fix is
+    # that private (compressed) test cases are now recovered instead of
+    # silently dropped, so the per-task test count should be MUCH higher than
+    # the old public-only ~2-4. Any remaining per-testcase loss (an input that
+    # won't ast.literal_eval) is counted here, never silently discarded.
+    if records:
+        print(
+            f"  Test cases: {total_usable} usable / {total_decoded} decoded "
+            f"(avg {total_usable / len(records):.1f} tests/task); "
+            f"{tasks_with_tc_loss} task(s) lost >=1 test case to input parsing.",
+            flush=True,
+        )
 
     # Apply max-problems cap after conversion.
     if args.max_problems is not None and len(records) > args.max_problems:
