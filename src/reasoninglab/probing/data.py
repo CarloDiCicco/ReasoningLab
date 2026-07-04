@@ -27,6 +27,28 @@ from pathlib import Path
 
 import numpy as np
 
+# ── Numerical-stability fix: use LAPACK's robust `gesvd` SVD driver ────────────
+# Every probing/analysis script imports this module, so patching here applies the
+# same fix uniformly to all runs. scikit-learn's PCA computes its SVD through
+# scipy.linalg.svd, whose default `gesdd` driver FAILS ("SVD did not converge")
+# on one ill-conditioned training fold in the corrected-tests run — verified to
+# be deterministic and NOT caused by CPU contention or threading (it crashes even
+# single-process, single-threaded). The robust `gesvd` driver decomposes that
+# same matrix without issue. The two drivers are numerically equivalent: on
+# normal folds they agree to ~1e-7 in explained variance, so probe AUC is
+# unaffected — only the LAPACK routine that computes the identical SVD changes.
+import scipy.linalg as _scipy_linalg
+
+_orig_scipy_svd = _scipy_linalg.svd
+
+
+def _robust_svd(a, *args, **kwargs):
+    kwargs["lapack_driver"] = "gesvd"
+    return _orig_scipy_svd(a, *args, **kwargs)
+
+
+_scipy_linalg.svd = _robust_svd
+
 
 @dataclass(frozen=True)
 class ProbeSample:

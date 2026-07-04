@@ -36,11 +36,19 @@ from reasoninglab.probing.probe import train_probe
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
-# Hardcoded paths and parameters. Change these when running on different data.
+# Defaults reproduce the published paper run exactly. To analyze a DIFFERENT
+# run (e.g. the corrected-tests replication) WITHOUT touching the paper's
+# outputs, override via environment variables — verify_covariate_redundancy.py
+# imports RUN_DIR/LAYER from here, so it inherits the same override:
+#   RL_RUN_DIR=runs/h2-trajectory-repair_b-CORRECTED_20260704_003141 \
+#   RL_OUTPUT_DIR=results/h2-CORRECTED/trajectory_analysis \
+#   RL_LAYER=29 \
+#   python scripts/analyze_trajectories.py
+import os
 
-RUN_DIR = Path("runs\h2-trajectory-all")
-LAYER = 29          # Upper decoder block selected by nested CV (see paper / probe analysis)
-OUTPUT_DIR = Path("results/h2/trajectory_analysis")
+RUN_DIR = Path(os.environ.get("RL_RUN_DIR", "runs/h2-trajectory-all"))
+LAYER = int(os.environ.get("RL_LAYER", "29"))   # upper decoder block; paper: layer 29 (nested-CV modal)
+OUTPUT_DIR = Path(os.environ.get("RL_OUTPUT_DIR", "results/h2/trajectory_analysis"))
 SEED = 0
 TOKEN_LIMIT = 768   # max_new_tokens from config — used to detect repetition loops
 
