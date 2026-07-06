@@ -71,6 +71,9 @@ def run_repair_b(
         failure_type = classify_result(execution)
 
         # Cost = inference time + subprocess execution time; tokens = prompt + completion.
+        # Persist the extracted candidate code (and a truncated stderr) so this run
+        # can later be re-graded under a different test suite — this isolates the
+        # effect of the test-suite fix from run-to-run generation stochasticity.
         attempt = AttemptRecord(
             task_id=task.task_id,
             policy="repair_b",
@@ -80,6 +83,8 @@ def run_repair_b(
             elapsed_s=generation.elapsed_s + execution.elapsed_s,
             prompt_tokens=generation.prompt_tokens,
             completion_tokens=generation.completion_tokens,
+            code=candidate_code,
+            stderr=(execution.stderr or "")[:4000] if execution.stderr else None,
         )
         attempts.append(attempt)
         if generation.hidden_states is not None:

@@ -22,6 +22,8 @@ Run:  python scripts/verify_covariate_redundancy.py
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from scipy import stats
 
@@ -62,7 +64,12 @@ def main() -> None:
     deltas, labels, covs = _collect_transition_deltas_with_covariates(records, trans_idx=0)
     n = len(labels)
     print(f"  Clean 0->1 deltas: N={n}  success={int(labels.sum())}  failure={n - int(labels.sum())}")
-    assert n == 236, f"expected 236 clean transitions, got {n}"
+    # Paper's OLD data yields 236 clean 0->1 transitions; the corrected-tests
+    # re-run yields a different count (labels changed) — accept it via env
+    # override so this check still guards the paper default (236) while letting
+    # the corrected run through with its own count.
+    expected_n = int(os.environ.get("RL_EXPECTED_N", "236"))
+    assert n == expected_n, f"expected {expected_n} clean transitions, got {n}"
 
     dpt = covs["delta_prompt_tokens"].astype(np.float64)
     cl0 = covs["code_length_attempt_0"].astype(np.float64)

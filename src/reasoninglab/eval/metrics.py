@@ -61,6 +61,16 @@ class AttemptRecord:
     p_pass: float | None = None     # probe P(pass) score for this task
     strategy: str | None = None     # "repair" or "retry" — routing decision
 
+    # ── generated code (None unless the policy chooses to persist it) ─────
+    # The extracted candidate solution for this attempt. Saved so a run can be
+    # re-graded later under a DIFFERENT test suite without re-running inference
+    # (isolates test-change effects from generation stochasticity). Defaults to
+    # None to keep older runs / other policies unchanged.
+    code: str | None = None
+    # Verifier stderr (truncated) for this attempt — useful for diagnosing
+    # timeouts vs assertions vs runtime errors post-hoc. None when not persisted.
+    stderr: str | None = None
+
 
 @dataclass(frozen=True)
 class RunMetrics:
