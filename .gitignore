@@ -209,18 +209,22 @@ __marimo__/
 offload_*/
 # ReasoningLab artifacts
 runs/*
-!runs/h2-trajectory-all/
-!runs/h2-trajectory-all/**
+!runs/h2-trajectory/
+!runs/h2-trajectory/**
 
 results/*
 !results/h2/
 !results/h2/**
+# derived diagnostic figures regenerate from the committed scripts; do not commit them
+results/**/*.png
 results/h2/**/*.png
 results/h2/**/*.joblib
 
 # Local model/offload artifacts
 offload_*/
 RESEARCH_LOG.md
+RESEARCH_LOG_V2.md
+OLD_RESEARCH_LOG.md
 
 # LaTeX build artifacts
 paper/*.pdf
