@@ -37,17 +37,17 @@ from reasoninglab.probing.probe import train_probe
 
 # ── Configuration ────────────────────────────────────────────────────────────
 # Defaults reproduce the published paper run exactly. To analyze a DIFFERENT
-# run (e.g. the corrected-tests replication) WITHOUT touching the paper's
-# outputs, override via environment variables — verify_covariate_redundancy.py
-# imports RUN_DIR/LAYER from here, so it inherits the same override:
-#   RL_RUN_DIR=runs/h2-trajectory-repair_b-CORRECTED_20260704_003141 \
-#   RL_OUTPUT_DIR=results/h2-CORRECTED/trajectory_analysis \
-#   RL_LAYER=29 \
+# run WITHOUT touching the paper's outputs, override via environment variables
+# — verify_covariate_redundancy.py imports RUN_DIR/LAYER from here, so it
+# inherits the same override:
+#   RL_RUN_DIR=runs/some-other-run \
+#   RL_OUTPUT_DIR=results/some-other-run \
+#   RL_LAYER=30 \
 #   python scripts/analyze_trajectories.py
 import os
 
-RUN_DIR = Path(os.environ.get("RL_RUN_DIR", "runs/h2-trajectory-all"))
-LAYER = int(os.environ.get("RL_LAYER", "29"))   # upper decoder block; paper: layer 29 (nested-CV modal)
+RUN_DIR = Path(os.environ.get("RL_RUN_DIR", "runs/h2-trajectory"))
+LAYER = int(os.environ.get("RL_LAYER", "30"))   # upper decoder block; paper: layer 30 (nested-CV modal)
 OUTPUT_DIR = Path(os.environ.get("RL_OUTPUT_DIR", "results/h2/trajectory_analysis"))
 SEED = 0
 TOKEN_LIMIT = 768   # max_new_tokens from config — used to detect repetition loops
@@ -2315,7 +2315,7 @@ def _collect_transition_deltas_with_covariates(
       - failure_type_attempt_0 (str array, len N)
 
     Filter logic must match `_collect_transition_deltas` exactly to keep the
-    same 236 clean tasks (128/108).
+    same 246 clean tasks (108/138).
     """
     deltas: list[np.ndarray] = []
     labels: list[bool] = []
@@ -2384,7 +2384,7 @@ def analysis_22_conditional_sensitivity(
     """Sensitivity analysis: covariate-distribution check + conditional residualization.
 
     Step 22a: For each candidate covariate, test whether its distribution
-    differs between the success group and the failure group on the 236 clean
+    differs between the success group and the failure group on the 246 clean
     0->1 transitions. Welch's t-test for continuous, chi-squared for categorical.
 
     Step 22b: Residualize ONLY against covariates flagged "differs" at alpha.

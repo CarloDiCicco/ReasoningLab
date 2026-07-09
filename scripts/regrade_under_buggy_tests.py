@@ -15,9 +15,9 @@ Writes: <OUT>/attempts.jsonl   (same schema, `passed`/`failure_type` re-derived
 
 Usage:
     python scripts/regrade_under_buggy_tests.py \
-        --run runs/h2-trajectory-repair_b-CORRECTED_20260706_133943 \
+        --run <RUN_DIR_WITH_SAVED_CODE> \
         --tests data/lcb_all.jsonl \
-        --out  runs/h2-CORRECTED-RUN2-BUGGYTESTS \
+        --out  <OUTPUT_RUN_DIR> \
         --timeout 8.0
 """
 from __future__ import annotations

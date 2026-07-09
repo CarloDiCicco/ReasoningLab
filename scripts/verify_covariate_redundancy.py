@@ -1,22 +1,22 @@
 """Verify the two redundancy claims in the Result 2 "Note" of the README/paper.
 
-The conditional residualization uses a 4-column covariate matrix in which the two
+The conditional residualization uses a 5-column covariate matrix in which the two
 continuous covariates, `delta_prompt_tokens` and `code_length_attempt_0`, overlap:
 the failed attempt-0 code is pasted into the repair prompt, so its length is part
-of both. This script measures, on the exact 236 clean 0->1 transitions used by the
+of both. This script measures, on the exact 246 clean 0->1 transitions used by the
 sensitivity check, the two numbers stated in the Note:
 
   1. Pearson r between `delta_prompt_tokens` and `code_length_attempt_0`.
-  2. The increase in in-sample R^2 of the per-dimension OLS fit on the 236 deltas
+  2. The increase in in-sample R^2 of the per-dimension OLS fit on the 246 deltas
      when the redundant `delta_prompt_tokens` column is added on top of the other
-     three columns (`code_length_attempt_0` + the two failure-type dummies).
+     four columns (`code_length_attempt_0` + the three failure-type dummies).
 
-For (2), "in-sample R^2 of the OLS fit on the 236 deltas" is averaged across all
+For (2), "in-sample R^2 of the OLS fit on the 246 deltas" is averaged across all
 2560 hidden-state delta dimensions, since each dimension is residualized by its own
-OLS. The reported gain is the mean R^2(full 4-col) - mean R^2(reduced 3-col).
+OLS. The reported gain is the mean R^2(full 5-col) - mean R^2(reduced 4-col).
 
-Reuses the loaders and filters of `analyze_trajectories.py` so the 236-task sample
-(128 success / 108 failure) matches the rest of the analysis exactly.
+Reuses the loaders and filters of `analyze_trajectories.py` so the 246-task sample
+(108 success / 138 failure) matches the rest of the analysis exactly.
 
 Run:  python scripts/verify_covariate_redundancy.py
 """
@@ -64,16 +64,16 @@ def main() -> None:
     deltas, labels, covs = _collect_transition_deltas_with_covariates(records, trans_idx=0)
     n = len(labels)
     print(f"  Clean 0->1 deltas: N={n}  success={int(labels.sum())}  failure={n - int(labels.sum())}")
-    # Paper's OLD data yields 236 clean 0->1 transitions; the corrected-tests
-    # re-run yields a different count (labels changed) — accept it via env
-    # override so this check still guards the paper default (236) while letting
-    # the corrected run through with its own count.
-    expected_n = int(os.environ.get("RL_EXPECTED_N", "236"))
+    # The paper run yields 246 clean 0->1 transitions; a different run may yield
+    # a different count (labels changed) — accept it via env override so this
+    # check still guards the paper default (246) while letting a different run
+    # through with its own count.
+    expected_n = int(os.environ.get("RL_EXPECTED_N", "246"))
     assert n == expected_n, f"expected {expected_n} clean transitions, got {n}"
 
     dpt = covs["delta_prompt_tokens"].astype(np.float64)
     cl0 = covs["code_length_attempt_0"].astype(np.float64)
-    Y = deltas.astype(np.float64)  # (236, 2560)
+    Y = deltas.astype(np.float64)  # (246, 2560)
 
     # ---- Claim 1: Pearson r between the two continuous covariates ----
     r, p = stats.pearsonr(dpt, cl0)

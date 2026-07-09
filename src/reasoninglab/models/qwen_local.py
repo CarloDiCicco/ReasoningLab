@@ -5,7 +5,7 @@ Local Qwen inference adapter.
 
 Loads a Qwen model once in __init__ and runs inference through generate().
 All supported models are loaded with 4-bit NF4 quantization (bitsandbytes)
-to fit within the RTX 4050 6GB VRAM budget.
+to fit within a modest (~6 GB) VRAM budget.
 
 Supported models (from README):
   Qwen/Qwen2.5-Coder-3B-Instruct  — 3B, device_map="auto", no offload
@@ -149,7 +149,7 @@ class QwenModel:
         # ── 4-bit quantization config ─────────────────────────────────────────
         # NF4 (Normal Float 4-bit) reduces each weight from 16-bit to ~4 bits.
         # 3B model: ~6 GiB float16 → ~1.5 GiB; 4B: ~8 GiB → ~2 GiB.
-        # Both fit comfortably within the RTX 4050's 6 GiB VRAM.
+        # Both fit comfortably within a ~6 GiB VRAM budget.
         # double_quant compresses the quantization constants themselves for
         # a small additional memory saving.
         #

@@ -11,7 +11,7 @@ Output:
   - <output_dir>/metrics.json with per-layer summaries and per-split lists
 
 Usage:
-  python scripts/layer_sweep_multisplit.py runs/h2-trajectory-all/hidden_states \
+  python scripts/layer_sweep_multisplit.py runs/h2-trajectory/hidden_states \
       --output-dir results/h2/probe_lcb444_multisplit --n-splits 50
 """
 
