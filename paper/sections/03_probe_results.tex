@@ -1,10 +1,10 @@
 \section{Correctness is linearly readable before generation}
 \label{sec:probe_results}
-Before any token is generated, the hidden state at the last prompt token encodes information about whether the model's first-attempt generation will be correct. With the probe layer selected by nested CV, as outlined in Section~\ref{subsec:layer_selection}, a linear probe trained on this single vector predicts pass/fail on held-out tasks with mean test area under the ROC curve (AUC) of $0.931 \pm 0.008$ over $50$ random splits, well above a prompt-length-only baseline of $0.754 \pm 0.014$.
+Before any token is generated, the hidden state at the last prompt token encodes information about whether the model's first-attempt generation will be correct. With the probe layer selected by nested CV, as outlined in Section~\ref{subsec:layer_selection}, a linear probe trained on this single vector predicts pass/fail on held-out tasks with mean test area under the ROC curve (AUC) of $0.955 \pm 0.006$ over $50$ random splits, well above a prompt-length-only baseline of $0.720 \pm 0.015$.
 
 \subsection{Procedure}
 
-For each of the 444 LiveCodeBench tasks, the hidden state at the last prompt token of the first attempt (attempt 0) is captured, producing a single 2560-dimensional vector per task per layer, as described in Section~\ref{sec:setup}. Each vector is labelled by whether the attempt-0 code passed the task's unit tests, and the probe is trained to predict this label. The pipeline is a three-step composition:
+For each of the 444 LiveCodeBench tasks, the hidden state at the last prompt token of the first attempt (attempt 0) is captured, producing a single 2560-dimensional vector per task per layer, as described in Section~\ref{sec:setup}. Each vector is labeled by whether the attempt-0 code passed the task's unit tests, and the probe is trained to predict this label. The pipeline is a three-step composition:
 \begin{enumerate}
     \item \texttt{StandardScaler}, fit on the training fold only.
     \item \texttt{PCA} retaining 95\% of cumulative variance, fit on the training fold only.
@@ -30,7 +30,7 @@ The single sample per task ensures no task appears in both train and test splits
 \subsection{Layer landscape and selection}
 \label{subsec:layer_selection}
 
-The raw three-step pipeline is applied to each of the captured upper-block layers (29--36). Running it independently per layer, on 50 random stratified $80/20$ splits each, gives the descriptive landscape in Table~\ref{tab:layer_sweep}: a gentle plateau that peaks at the lower bound of the captured range (layers 29--30) and declines slightly toward layer 36. Unlike the monotonic increase of linear separability with depth reported for convolutional networks \citep{alain2016probes}, the probe AUC here peaks before the final block and then declines, suggesting that final transformer layers shift from maintaining general semantic representations to optimizing for next-token prediction.
+The raw three-step pipeline is applied to each of the captured upper-block layers (29--36). Running it independently per layer, on 50 random stratified $80/20$ splits each, gives the descriptive landscape in Table~\ref{tab:layer_sweep}, a gentle plateau that peaks near the shallow end of the captured range at layer 30 and declines slightly toward layer 36. Unlike the monotonic increase of linear separability with depth reported for convolutional networks \citep{alain2016probes}, the probe AUC here peaks before the final block and then declines, suggesting that final transformer layers shift from maintaining general semantic representations to optimizing for next-token prediction.
 
 \begin{table}[h]
 \centering
@@ -38,15 +38,15 @@ The raw three-step pipeline is applied to each of the captured upper-block layer
 \toprule
 Layer & 29 & 30 & 31 & 32 & 33 & 34 & 35 & 36 \\
 \midrule
-Test AUC & $0.934$ & $0.932$ & $0.924$ & $0.920$ & $0.920$ & $0.919$ & $0.917$ & $0.913$ \\
-CV AUC   & $0.938$ & $0.939$ & $0.933$ & $0.929$ & $0.929$ & $0.926$ & $0.925$ & $0.923$ \\
+Test AUC & $0.952$ & $0.956$ & $0.952$ & $0.951$ & $0.946$ & $0.944$ & $0.942$ & $0.939$ \\
+CV AUC   & $0.948$ & $0.954$ & $0.951$ & $0.948$ & $0.944$ & $0.943$ & $0.941$ & $0.938$ \\
 \bottomrule
 \end{tabular}
-\caption{Per-layer probe performance on the 444 LiveCodeBench tasks: an independent per-layer sweep, using its own 50 random stratified 80/20 splits, each layer is evaluated on both mean test and CV AUC. The upper blocks form a shallow plateau peaking at layers 29--30. This table is descriptive only: selecting the argmax layer on these test scores would constitute selection on the test set, which the nested CV procedure below avoids.}
+\caption{Per-layer probe performance on the 444 LiveCodeBench tasks: an independent per-layer sweep, using its own 50 random stratified 80/20 splits, each layer is evaluated on both mean test and CV AUC. The upper blocks form a shallow plateau peaking at layer 30. This table is descriptive only, selecting the argmax layer on these test scores would constitute selection on the test set, which the nested CV procedure below avoids.}
 \label{tab:layer_sweep}
 \end{table}
 
-Because the layer is a hyperparameter, choosing it by the test-set argmax of Table~\ref{tab:layer_sweep} would leak the test set into the model-selection step and bias the reported performance upward \citep{cawley2010overfitting}. The layer is therefore selected by nested CV, following the same validation-based layer-selection logic used in prior work on internal correctness representations \citep{ribeiro2025internal}. Across 50 outer stratified $80/20$ splits (the outer loop, whose held-out folds provide the unbiased estimate), the layer, jointly with the regularization strength $C$, is selected by 5-fold CV within each outer training fold; the selected configuration is refit on the full outer-training fold and evaluated once on the untouched outer-test fold. Layer 29 emerges as the modal selection, chosen in $25$ of $50$ outer splits, with layer 30 a statistical near-tie at $24$; Table~\ref{tab:nested_cv_selection} shows that selection concentrates almost entirely on these two layers. The configuration selected most frequently across the 50 splits is layer 29 and $C = 0.01$, chosen in $22$ of them; this modal frequency is the criterion by which the final hyperparameter combination is fixed. The leakage-free outer-test AUC of the full select-then-train procedure is $0.931 \pm 0.008$. Layer 29 is adopted for all subsequent analyses on the basis of this modal selection; the descriptive sweep in Table~\ref{tab:layer_sweep} is consistent, ranking layer 29 highest ($0.934$), with layer 30 statistically indistinguishable.
+Because the layer is a hyperparameter, choosing it by the test-set argmax of Table~\ref{tab:layer_sweep} would leak the test set into the model-selection step and bias the reported performance upward \citep{cawley2010overfitting}. The layer is therefore selected by nested CV, following the same validation-based layer-selection logic used in prior work on internal correctness representations \citep{ribeiro2025internal}. Across 50 outer stratified $80/20$ splits (the outer loop, whose held-out folds provide the unbiased estimate), the layer, jointly with the regularization strength $C$, is selected by 5-fold CV within each outer training fold; the selected configuration is refit on the full outer-training fold and evaluated once on the untouched outer-test fold. Layer 30 emerges as the modal selection, chosen in $42$ of $50$ outer splits, with layer 31 a distant second at $8$, so that selection concentrates almost entirely on layer 30, as Table~\ref{tab:nested_cv_selection} shows. The configuration selected most frequently across the 50 splits is layer 30 and $C = 0.01$, chosen in $35$ of them, and this modal frequency is the criterion by which the final hyperparameter combination is fixed. The leakage-free outer-test AUC of the full select-then-train procedure is $0.955 \pm 0.006$. Layer 30 is adopted for all subsequent analyses on the basis of this modal selection, and the descriptive sweep in Table~\ref{tab:layer_sweep} is consistent, ranking layer 30 among the highest with the neighboring layers statistically indistinguishable.
 
 \begin{table}[h]
 \centering
@@ -54,10 +54,10 @@ Because the layer is a hyperparameter, choosing it by the test-set argmax of Tab
 \toprule
 Layer & 29 & 30 & 31 & 32 & 33 & 34 & 35 & 36 \\
 \midrule
-Times selected (of 50) & $25$ & $24$ & $1$ & $0$ & $0$ & $0$ & $0$ & $0$ \\
+Times selected (of 50) & $0$ & $42$ & $8$ & $0$ & $0$ & $0$ & $0$ & $0$ \\
 \bottomrule
 \end{tabular}
-\caption{Nested-CV layer selection: how often each layer is chosen, across all $C$ values, as part of the best (layer, $C$) configuration over the 50 outer splits. The grid search operates jointly over layer and $C$; this table shows the layer counts collapsed across $C$ to make the layer preference visible. Selection concentrates on layers 29--30, accounting for $49$ of $50$ splits, with deeper layers never selected; within these, $C = 0.01$ is the most frequent regularization strength, appearing in $43$ of $50$ splits. The full procedure's leakage-free outer-test AUC is $0.931 \pm 0.008$.}
+\caption{Nested-CV layer selection, how often each layer is chosen, across all $C$ values, as part of the best (layer, $C$) configuration over the 50 outer splits. The grid search operates jointly over layer and $C$, and this table shows the layer counts collapsed across $C$ to make the layer preference visible. Selection concentrates on layers 30--31, accounting for all $50$ splits, with deeper layers never selected, and within these $C = 0.01$ is the most frequent regularization strength, appearing in $43$ of $50$ splits.}
 \label{tab:nested_cv_selection}
 \end{table}
 
@@ -71,18 +71,18 @@ Each number in Table~\ref{tab:probe_results} is a leakage-free procedure-level e
 \toprule
 Configuration & Test AUC (mean $\pm$ 95\% CI) \\
 \midrule
-Raw hidden states    & $0.931 \pm 0.008$ \\
-Residualized         & $0.911 \pm 0.010$ \\
-Prompt-only baseline & $0.754 \pm 0.014$ \\
+Raw hidden states    & $0.955 \pm 0.006$ \\
+Residualized         & $0.940 \pm 0.009$ \\
+Prompt-only baseline & $0.720 \pm 0.015$ \\
 \bottomrule
 \end{tabular}
 \caption{Nested CV procedure-level performance for the three probe configurations, averaged over 50 outer stratified $80/20$ splits. Values are leakage-free outer-test AUCs.}
 \label{tab:probe_results}
 \end{table}
 
-The raw configuration reaches mean outer-test AUC $0.931$. After linearly removing prompt length from every hidden state dimension, the residualized configuration reaches $0.911$. The prompt-only baseline reaches $0.754$. The gap between the residualized probe and the prompt-only baseline is about $16$ AUC points, placing a concrete floor under the result: a substantial portion of the hidden state's pass/fail signal is not explained by prompt length and survives its removal. The signal is present before a single output token is generated, encoded in the model's internal representation of the prompt alone.
+The raw configuration reaches mean outer-test AUC $0.955$. After linearly removing prompt length from every hidden state dimension, the residualized configuration reaches $0.940$. The prompt-only baseline reaches $0.720$. The gap between the residualized probe and the prompt-only baseline is about $22$ AUC points, placing a concrete floor under the result, a substantial portion of the hidden state's pass/fail signal is not explained by prompt length and survives its removal. The signal is present before a single output token is generated, encoded in the model's internal representation of the prompt alone.
 
-The prompt-only baseline reported above uses logistic regression. To check that this floor does not depend on the choice of a linear model, a random forest, a gradient boosting model, and a small multilayer perceptron were each fit on \texttt{prompt\_tokens} alone under the same nested CV procedure described in Section~\ref{subsec:layer_selection}. Table~\ref{tab:length_baselines} reports their mean outer-test AUC. None exceeds the logistic baseline, and all remain near $0.754$, far below the residualized probe at $0.911$. Prompt length alone does not approach the residualized probe, so the probe's gap over the prompt-length baseline is not an artifact of the baseline being restricted to a linear model.
+The prompt-only baseline reported above uses logistic regression. To check that this floor does not depend on the choice of a linear model, a random forest, a gradient boosting model, and a small multilayer perceptron were each fit on \texttt{prompt\_tokens} alone under the same nested CV procedure described in Section~\ref{subsec:layer_selection}. Table~\ref{tab:length_baselines} reports their mean outer-test AUC. None exceeds the logistic baseline. Even fit with nonlinear models, prompt length does not approach the residualized probe, so the probe's gap is not an artifact of the baseline being restricted to a linear model.
 
 \begin{table}[h]
 \centering
@@ -90,10 +90,10 @@ The prompt-only baseline reported above uses logistic regression. To check that 
 \toprule
 Prompt-only model & Test AUC (mean $\pm$ 95\% CI) \\
 \midrule
-Logistic regression   & $0.754 \pm 0.014$ \\
-Random forest         & $0.735 \pm 0.016$ \\
-Gradient boosting     & $0.736 \pm 0.016$ \\
-Multilayer perceptron & $0.753 \pm 0.014$ \\
+Logistic regression   & $0.720 \pm 0.015$ \\
+Random forest         & $0.700 \pm 0.017$ \\
+Gradient boosting     & $0.698 \pm 0.016$ \\
+Multilayer perceptron & $0.719 \pm 0.015$ \\
 \bottomrule
 \end{tabular}
 \caption{Mean outer-test AUC for prompt-only models, each fit on \texttt{prompt\_tokens} alone following the nested CV procedure of Section~\ref{subsec:layer_selection}, with model-specific hyperparameter grids tuned in the inner folds. The logistic model is the strongest, and the nonlinear families do not improve on it.}
