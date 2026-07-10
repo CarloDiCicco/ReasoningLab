@@ -250,8 +250,8 @@
     ]
   },
   "reference": {
-    "linear_baseline": 0.754,
-    "residualized_probe": 0.911,
-    "raw_probe": 0.931
+    "linear_baseline": 0.72,
+    "residualized_probe": 0.94,
+    "raw_probe": 0.955
   }
 }
