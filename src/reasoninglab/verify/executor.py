@@ -215,7 +215,61 @@ for _attr in _LINUX_ONLY_OS_ATTRS:
     if hasattr(_os, _attr):
         setattr(_os, _attr, None)
 
+# ── Close the wildcard-import hole ────────────────────────────────────────────
+# The stdlib import block prepended BEFORE this preamble (see
+# _LIVECODEBENCH_IMPORTS) runs `from sys import *` and `from builtins import *`,
+# which bind bare globals `exit` and `quit` pointing at the real functions.
+# Nullifying the module attributes above (_sys.exit, _os._exit) does NOT touch
+# those bare globals, so a candidate could still call exit()/quit() to fake an
+# early clean exit. Re-nullify the bare names here, AFTER the wildcard imports.
+exit = None
+quit = None
 # ── End of safety preamble ────────────────────────────────────────────────────
+'''
+
+# LiveCodeBench's exact import preamble (lcb_runner/evaluation/testing_util.py,
+# variable `import_string`), prepended verbatim so candidate code sees the same
+# implicitly-available stdlib names the LiveCodeBench judge provides (e.g. bare
+# List, deque, math.*), and the same recursion limit. Without this, otherwise
+# correct LeetCode-style solutions fail with NameError / RecursionError on names
+# the platform supplies for free. Kept character-for-character faithful to the
+# upstream source for benchmark comparability.
+_LIVECODEBENCH_IMPORTS = '''\
+from string import *
+from re import *
+from datetime import *
+from collections import *
+from heapq import *
+from bisect import *
+from copy import *
+from math import *
+from random import *
+from statistics import *
+from itertools import *
+from functools import *
+from operator import *
+from io import *
+from sys import *
+from json import *
+from builtins import *
+from typing import *
+import string
+import re
+import datetime
+import collections
+import heapq
+import bisect
+import copy
+import math
+import random
+import statistics
+import itertools
+import functools
+import operator
+import io
+import sys
+import json
+sys.setrecursionlimit(50000)
 '''
 
 
@@ -284,10 +338,12 @@ def _build_script(candidate_code: str, test_code: str) -> str:
     """Concatenate preamble + candidate code + test code into one runnable script.
 
     Execution order:
-      1. Safety preamble  – nullifies dangerous functions first.
-      2. Candidate code   – defines the solution function(s).
-      3. Test code        – calls assertions against those functions.
-      4. Sentinel print   – emitted only if steps 2 and 3 completed without error.
+      1. LiveCodeBench imports – stdlib names the judge provides implicitly.
+      2. Safety preamble  – nullifies dangerous functions (after imports, so it
+                            also closes the bare exit/quit wildcard-import hole).
+      3. Candidate code   – defines the solution function(s).
+      4. Test code        – calls assertions against those functions.
+      5. Sentinel print   – emitted only if steps 3 and 4 completed without error.
 
     Two blank lines between blocks follow PEP 8 top-level separation and keep
     tracebacks readable (line numbers map to the combined script).
@@ -299,7 +355,9 @@ def _build_script(candidate_code: str, test_code: str) -> str:
     sentinel_footer = f'\nprint("{_PASS_SENTINEL}")\n'
 
     return (
-        _SAFETY_PREAMBLE
+        _LIVECODEBENCH_IMPORTS
+        + "\n"
+        + _SAFETY_PREAMBLE
         + "\n\n"
         + candidate_code.rstrip()
         + "\n\n"
