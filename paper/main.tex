@@ -18,7 +18,7 @@
     urlcolor=blue,
 }
 
-\title{\textbf{Code Correctness Signals in LLM Hidden States: Pre-Generation Probing and Repair Geometry}}
+\title{\textbf{Code Correctness Is Linearly Decodable from LLM Hidden States Before Generation}}
 \author{Carlo Di Cicco\thanks{Independent researcher. Contact: \texttt{cdicicco2001@gmail.com}. Code, data, and analysis scripts: \url{https://github.com/CarloDiCicco/ReasoningLab}}}
 \date{}
 
@@ -27,17 +27,12 @@
 \maketitle
 
 \begin{abstract}
-Large language models encode rich information in their hidden states. This work asks whether code correctness is legible in the hidden states of Qwen3-4B-Instruct-2507, before it generates and as it repairs a failed attempt, studied on 444 LiveCodeBench tasks. 
-It reports two findings connected by a single confound-control tool: residualization. First, the correctness of the model's first-attempt code is linearly decodable from the prompt-final hidden state, with a leakage-free held-out AUC of $0.955 \pm 0.006$ across 50 outer splits. After the linear effect of prompt length is removed from each hidden state dimension, the probe still reaches $0.940 \pm 0.009$, well above a prompt-length baseline of $0.720 \pm 0.015$. 
-Second, on 246 cleaned cases where the model attempts to repair a failed first attempt, the hidden state shift from the failing attempt to its repair carries a robust geometric direction of repair success, significant on both a magnitude and a split-half test against label-shuffled nulls.
-This direction remains significant on both tests after a conditional residualization against three repair-context covariates that differ between successful and failed repairs, indicating a genuine repair-success signal that the observable repair context does not account for.
-The contribution is as much methodological as empirical, a confound-control diagnostic that reports each signal only to the extent it survives the control.
+Large language models encode rich information in their hidden states. This work asks whether the correctness of code that Qwen3-4B-Instruct-2507 has not yet generated is already legible in its hidden states, evaluated on a set of 444 tasks from LiveCodeBench. The correctness of the model's first-attempt code is linearly decodable from the hidden state at the final prompt token, captured before any output token is generated, with a leakage-free held-out AUC of $0.881 \pm 0.008$ across 50 outer splits. To assess whether this signal is explained by prompt length, each hidden-state dimension is residualized with respect to the linear effect of prompt length. The probe still achieves an AUC of $0.842 \pm 0.010$, substantially above a prompt-length baseline of $0.657 \pm 0.014$, and none of the nonlinear prompt-length models tested improves upon this baseline. A companion question about the model's self-repair behavior could not be answered because successful repairs following a failed first attempt are too rare in this setting to sustain a reliable geometric analysis. The contribution is both empirical and methodological, providing evidence that pre-generation hidden states contain a robust signal of eventual code correctness, together with a confound-control diagnostic that quantifies how much of that signal survives adjustment for prompt length.
 \end{abstract}
 
 \input{sections/01_introduction}
 \input{sections/02_setup}
 \input{sections/03_probe_results}
-\input{sections/04_repair_geometry}
 \input{sections/05_limitations}
 \input{sections/06_conclusion}
 

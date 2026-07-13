@@ -1,21 +1,16 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-This work examined two related questions about the layer-30 hidden states of Qwen3-4B-Instruct-2507 on LiveCodeBench tasks. 
-The first asked whether code correctness is decodable from the prompt-final hidden state, before any token is generated. 
-A linear probe answered yes, with performance robust across many random splits and surviving the linear removal of prompt length. 
-Prompt length alone, fit with nonlinear models as well as a linear one, stayed near $0.720$ AUC and far below the probe, so its lead is not an artifact of a linear baseline. 
-The second asked whether the hidden state shift from a failing attempt to its repair attempt carries a geometric signature of repair success. 
-A statistically detectable contrastive direction exists in the raw deltas, and although a conditional residualization against observable repair-context covariates that differ between groups reduces it in both magnitude and stability, the direction remains significant on both tests. 
-It is best read as a repair-success signal that the observable repair context does not fully account for.
+This work examined whether code correctness is decodable from the prompt-final hidden states of Qwen3-4B-Instruct-2507 on LiveCodeBench tasks, before any token is generated.
+A linear probe answered yes, with performance robust across many random splits and surviving the linear removal of prompt length: the residualized probe reaches $0.842$ AUC against a prompt-length baseline of $0.657$.
+Prompt length alone, fit with nonlinear models as well as a linear one, stayed far below the probe, so its lead is not an artifact of a linear baseline.
+A companion question, whether the hidden state shift from a failing attempt to its repair carries a geometric signature of repair success, could not be answered: successful repairs are too rare in this setting to estimate any direction, and Section~\ref{sec:limitations} reports it as a null result.
 
-Both questions in this paper were answered with the help of the same tool, residualization, the operation of regressing each hidden state dimension on a candidate covariate and subtracting the prediction, applied before the downstream test. 
-In Section~\ref{sec:probe_results} the probe's signal survived residualizing against prompt length, showing that the hidden states carry a correctness signal not reducible to input length. 
-In Section~\ref{sec:repair_geometry} the same operation, this time against three repair-context covariates that differed between groups, removed a substantial part of the geometric direction while leaving a residual that stayed significant on both tests. 
-What the raw deltas presented as a single strong direction was in part driven by what differed in the repair prompt itself, yet a genuine repair-success signal remained once that part was subtracted. 
-The value of residualization is that it separates these two contributions, and in Section~\ref{sec:repair_geometry} its use was made conditional on whether the covariate to be removed is one that the contrastive construction has not already cancelled, which is what motivated the covariate-distribution check used there.
+The question was answered with the help of the residualization tool.
+The probe's signal survived residualizing against prompt length while giving up only a small part of its raw performance, showing that the hidden states carry a correctness signal not reducible to input length.
+The value of residualization is that it separates the part of a raw signal the covariate can account for from the part that is genuinely the representation's own, and reports only the latter.
 
-Several extensions of this work are natural, two of which stand out. The first is to replicate both analyses across other open-weight models, which would help separate findings that are specific to this one model from properties shared across language models. 
-The second, more targeted at the repair-direction analysis, is to collect a larger sample of successful multi-step repairs: with more successful transitions at $1 \to 2$, $2 \to 3$, and beyond, the contrastive direction analysis could be repeated step by step rather than only at the first repair. 
-Code generation is a particularly tractable domain for this kind of analysis: outputs are objectively verifiable, the failure modes are observable, and each task gives a binary pass/fail signal. More generally, as language models grow more capable their internal computation grows more elaborate, and there is correspondingly more to learn from studying what those internals encode. 
+Several extensions of this work are natural, two of which stand out. The first is to replicate the analysis across other open-weight models, which would help separate findings that are specific to this one model from properties shared across language models.
+The second is to gather many more successful self-repairs, for instance on easier tasks or with a stronger model, on which the repair-direction question left open here could actually be tested.
+Code generation is a particularly tractable domain for this kind of analysis: outputs are objectively verifiable, the failure modes are observable, and each task gives a binary pass/fail signal. More generally, as language models grow more capable their internal computation grows more elaborate, and there is correspondingly more to learn from studying what those internals encode.
 The contribution of this study is as much methodological as empirical. A signal is only as trustworthy as the confound control it survives, and what this paper claims is exactly what survived it.
