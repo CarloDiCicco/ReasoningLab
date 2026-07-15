@@ -26,7 +26,7 @@ ReasoningLab/
 │   ├── layer_sweep_multisplit.py      ← descriptive per-layer sweep (the layer landscape)
 │   ├── repair_summary.py              ← repair-trajectory summary; source of the recovery counts and per-attempt pass rates the paper reports as a null result
 │   ├── train_probe.py                 ← standalone probe trainer on a single train/test split (--residualize); a dev utility, not used for the reported numbers
-│   └── prepare_livecodebench.py       ← LCB data prep + utilities
+│   └── prepare_livecodebench.py       ← downloads LiveCodeBench and builds the task file Path B reads
 ├── src/reasoninglab/
 │   ├── probing/                       ← probe + hidden state utilities
 │   ├── policies/                      ← sampling / repair policies
