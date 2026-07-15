@@ -6,11 +6,10 @@ A linear probe answered yes, with performance robust across many random splits a
 Prompt length alone, fit with nonlinear models as well as a linear one, stayed far below the probe, so its lead is not an artifact of a linear baseline.
 A companion question, whether the hidden state shift from a failing attempt to its repair carries a geometric signature of repair success, could not be answered: successful repairs are too rare in this setting to estimate any direction, and Section~\ref{sec:limitations} reports it as a null result.
 
-The question was answered with the help of the residualization tool.
 The probe's signal survived residualizing against prompt length while giving up only a small part of its raw performance, showing that the hidden states carry a correctness signal not reducible to input length.
 The value of residualization is that it separates the part of a raw signal the covariate can account for from the part that is genuinely the representation's own, and reports only the latter.
 
-Several extensions of this work are natural, two of which stand out. The first is to replicate the analysis across other open-weight models, which would help separate findings that are specific to this one model from properties shared across language models.
+Two extensions of this work stand out. The first is to replicate the analysis across other open-weight models, which would help separate findings that are specific to this one model from properties shared across language models.
 The second is to gather many more successful self-repairs, for instance on easier tasks or with a stronger model, on which the repair-direction question left open here could actually be tested.
 Code generation is a particularly tractable domain for this kind of analysis: outputs are objectively verifiable, the failure modes are observable, and each task gives a binary pass/fail signal. More generally, as language models grow more capable their internal computation grows more elaborate, and there is correspondingly more to learn from studying what those internals encode.
 The contribution of this study is as much methodological as empirical. A signal is only as trustworthy as the confound control it survives, and what this paper claims is exactly what survived it.
