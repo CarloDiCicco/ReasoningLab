@@ -1,0 +1,47 @@
+# Generation config for the paper's trajectory run.
+#
+# Generates the 444-task, 5-attempt LiveCodeBench repair trajectories that back
+# both results in the paper. Each task is graded against its full public+private
+# test suites (from data/lcb_all_FIXED.jsonl), and the prompt-final hidden state
+# of every attempt is captured for the probe and repair-geometry analyses.
+#
+# The model is Qwen3-4B-Instruct-2507 loaded with 4-bit NF4 quantization
+# (models/qwen_local.py default). All 444 tasks run in a single pass. The
+# generation parameters are set below; verifier_timeout_s is 30.0s (see the
+# runtime: block for the reason). Produces runs/h2-trajectory/.
+
+experiment_id: h2-trajectory
+hypothesis: H2
+policy: repair_b
+seed: 0
+model_id: Qwen/Qwen3-4B-Instruct-2507
+budget_B: 5
+
+generation:
+  max_new_tokens: 1024
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  presence_penalty: 0.0
+
+runtime:
+  # Raised from the paper's 8.0s to 30.0s: the corrected private test suites
+  # inline very large inputs (up to ~37 MB of test code in one task), and
+  # Python needs >2s just to COMPILE the test literals on 13/444 tasks (>4s on
+  # 4 tasks, measured) BEFORE the candidate solution runs at all. At 8s those
+  # tasks were being killed and mislabeled `timeout` regardless of solution
+  # quality (timeout rate jumped 0.2% -> 7.3% vs the buggy run). 30s clears the
+  # heaviest correct suites while still catching genuine infinite loops (a real
+  # hang never terminates, so 8s vs 30s does not change what we catch, only
+  # whether slow-but-correct / harness-bound tasks are falsely timed out).
+  verifier_timeout_s: 30.0
+  capture_device_map: true
+  return_hidden_states: true
+
+paths:
+  tasks_file: data/lcb_all_FIXED.jsonl
+  runs_root: runs
+  results_root: results/h2
