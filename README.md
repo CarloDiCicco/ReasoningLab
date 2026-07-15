@@ -82,7 +82,7 @@ python scripts/repair_summary.py                           # recovery counts, pe
 
 **Path B: regenerate the hidden states from scratch (needs a GPU).** This
 re-runs the model and rebuilds the run directory that Path A analyzes. The
-LiveCodeBench task file the run reads (`data/lcb_all_FIXED.jsonl`, about 1 GB)
+LiveCodeBench task file the run reads (`data/lcb_all_tiers.jsonl`, about 1 GB)
 is too large to commit and must be rebuilt first with
 `scripts/prepare_livecodebench.py`, which pulls the problems and their test
 suites from the LiveCodeBench release. Because generation is sampled, a fresh
@@ -96,7 +96,7 @@ pip install -e ".[model,data]"                     # transformers, accelerate, b
 # tiers the paper uses, so pass --difficulty explicitly and name the output
 python scripts/prepare_livecodebench.py \
     --difficulty easy,medium,hard \
-    --output data/lcb_all_FIXED.jsonl
+    --output data/lcb_all_tiers.jsonl
 
 # run generation; rebuilds runs/h2-trajectory/
 # (Qwen/Qwen3-4B-Instruct-2507 weights download automatically; experiments ran on an NVIDIA DGX)

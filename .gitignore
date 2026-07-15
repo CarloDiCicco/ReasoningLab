@@ -239,4 +239,4 @@ paper/*.fls
 paper/*.fdb_latexmk
 paper/*.synctex.gz
 
-data/lcb_all_FIXED.jsonl
+data/lcb_all_tiers.jsonl

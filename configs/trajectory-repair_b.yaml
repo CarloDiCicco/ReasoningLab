@@ -2,7 +2,7 @@
 #
 # Generates the 444-task, 5-attempt LiveCodeBench repair trajectories that back
 # both results in the paper. Each task is graded against its full public+private
-# test suites (from data/lcb_all_FIXED.jsonl), and the prompt-final hidden state
+# test suites (from data/lcb_all_tiers.jsonl), and the prompt-final hidden state
 # of every attempt is captured for the probe and repair-geometry analyses.
 #
 # The model is Qwen3-4B-Instruct-2507 loaded with 4-bit NF4 quantization
@@ -42,6 +42,6 @@ runtime:
   return_hidden_states: true
 
 paths:
-  tasks_file: data/lcb_all_FIXED.jsonl
+  tasks_file: data/lcb_all_tiers.jsonl
   runs_root: runs
   results_root: results/h2
