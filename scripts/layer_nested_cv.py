@@ -150,7 +150,10 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Nested CV with joint (layer x C) grid for the H2 probe.")
     p.add_argument("hidden_states_dir")
-    p.add_argument("--output-dir", default="results/h2/probe_lcb444_nested_cv_grid")
+    p.add_argument("--output-dir", default=None,
+                   help="Defaults to results/h2/probe_nested_cv_grid, or "
+                        "results/h2/probe_nested_cv_grid_resid under --residualize, "
+                        "so the raw and residualized runs cannot overwrite each other.")
     p.add_argument("--n-outer-splits", type=int, default=50)
     p.add_argument("--n-inner-folds", type=int, default=5)
     p.add_argument("--pca-variance", type=float, default=0.95)
@@ -159,7 +162,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--residualize", action="store_true",
                    help="Residualize prompt_tokens out of hidden states inside "
                         "each inner fold; selection becomes residualized-AUC-based.")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.output_dir is None:
+        args.output_dir = ("results/h2/probe_nested_cv_grid_resid"
+                           if args.residualize else
+                           "results/h2/probe_nested_cv_grid")
+    return args
 
 
 # ── Aggregation ───────────────────────────────────────────────────────────────

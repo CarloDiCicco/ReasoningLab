@@ -7,9 +7,9 @@ Loads a YAML/JSON config, optionally overrides fields from the command line,
 then runs one policy arm across all tasks.
 
 Usage:
-    python -m reasoninglab.cli --config configs/trajectory-repair_b-CORRECTED.yaml
-    python -m reasoninglab.cli --config configs/trajectory-repair_b-CORRECTED.yaml --policy best_of_b
-    python -m reasoninglab.cli --config configs/trajectory-repair_b-CORRECTED.yaml --budget 5 --max-tasks 10
+    python -m reasoninglab.cli --config configs/trajectory-repair_b.yaml
+    python -m reasoninglab.cli --config configs/trajectory-repair_b.yaml --policy best_of_b
+    python -m reasoninglab.cli --config configs/trajectory-repair_b.yaml --budget 5 --max-tasks 10
 
 Flow:
     1. Load ExperimentConfig from --config path

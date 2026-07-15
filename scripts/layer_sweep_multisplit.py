@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Multi-split per-layer probe sweep.
 
-Reuses the same pipeline as train_probe.py / analyze_trajectories.py:
+Reuses the same pipeline as train_probe.py:
 StandardScaler -> PCA(0.95 variance) -> LogisticRegression(L2), with 5-fold
 inner CV on C in {1e-3, 1e-2, 1e-1, 1, 10}. Runs N stratified 80/20 splits
 per layer and aggregates mean +/- 95% CI of test AUC and CV AUC.

@@ -9,8 +9,8 @@ protocol used for the main probe: 50 outer stratified 80/20 splits, inner
 5-fold CV grid search for hyperparameters, mean outer-test AUC +/- 95% CI.
 
 If even a flexible nonlinear length model stays well below the residualized
-probe (0.940) and near the linear length baseline (0.720), then the probe's
-signal is not an artifact of a nonlinear length-difficulty relationship.
+probe and near the linear length baseline, then the probe's signal is not an
+artifact of a nonlinear length-difficulty relationship.
 
 One feature only (prompt_tokens), 444 samples. StandardScaler is applied (a
 no-op-ish but harmless single-feature scaling); no PCA (1 feature).
@@ -139,8 +139,8 @@ def main() -> None:
         summaries[m] = s
         print(f"{m:<20}{s['mean']:.3f} ± {s['ci95_half']:.3f}{'':<14}[{s['min']:.3f}, {s['max']:.3f}]")
     print("=" * 64)
-    print("Reference: linear logistic prompt-only baseline = 0.720; "
-          "residualized probe = 0.940; raw probe = 0.955.")
+    print("Compare against the probe runs in results/h2/probe_nested_cv_grid/ "
+          "and probe_nested_cv_grid_resid/.")
     print("=" * 64)
 
     payload = {
@@ -151,7 +151,6 @@ def main() -> None:
         "models": args.models,
         "per_model_test_auc_summary": summaries,
         "per_model_test_auc_per_split": per_model_aucs,
-        "reference": {"linear_baseline": 0.720, "residualized_probe": 0.940, "raw_probe": 0.955},
     }
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
