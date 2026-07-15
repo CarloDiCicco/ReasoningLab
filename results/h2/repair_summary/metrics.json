@@ -1,0 +1,42 @@
+{
+  "run_dir": "runs/h2-trajectory",
+  "budget": 5,
+  "n_tasks": 444,
+  "attempt0_pass": 178,
+  "attempt0_pass_rate": 0.4009009009009009,
+  "attempt0_fail": 266,
+  "ever_recovered": 20,
+  "repair_transitions": {
+    "0->1": 14,
+    "1->2": 5,
+    "2->3": 1
+  },
+  "repair_transitions_total": 20,
+  "conditional_pass_rate": {
+    "0": {
+      "passed": 178,
+      "eligible": 444,
+      "rate": 0.4009009009009009
+    },
+    "1": {
+      "passed": 14,
+      "eligible": 266,
+      "rate": 0.05263157894736842
+    },
+    "2": {
+      "passed": 5,
+      "eligible": 252,
+      "rate": 0.01984126984126984
+    },
+    "3": {
+      "passed": 1,
+      "eligible": 247,
+      "rate": 0.004048582995951417
+    },
+    "4": {
+      "passed": 0,
+      "eligible": 246,
+      "rate": 0.0
+    }
+  }
+}
