@@ -6,9 +6,9 @@ Before any token is generated, the hidden state at the last prompt token encodes
 
 For each of the 444 LiveCodeBench tasks, the hidden state at the last prompt token of the first attempt (attempt 0) is captured, producing a single 2560-dimensional vector per task per layer, as described in Section~\ref{sec:setup}. Each vector is labeled by whether the attempt-0 code passed the task's unit tests, and the probe is trained to predict this label. The pipeline is a three-step composition:
 \begin{enumerate}
-    \item \texttt{StandardScaler}, fit on the training fold only.
-    \item \texttt{PCA} retaining 95\% of cumulative variance, fit on the training fold only.
-    \item \texttt{LogisticRegression} with $\ell_2$ regularization. The regularization strength $C$ is selected by 5-fold CV inside the training fold, scoring on \texttt{roc\_auc}, over the grid
+    \item Standardization (mean-centering and unit-variance scaling), fit on the training fold only.
+    \item PCA retaining 95\% of cumulative variance, fit on the training fold only.
+    \item Logistic regression with $\ell_2$ regularization. The regularization strength $C$ is selected by 5-fold CV inside the training fold, scoring on AUC, over the grid
     \[
         \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10\}.
     \]
