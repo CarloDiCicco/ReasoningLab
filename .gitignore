@@ -224,6 +224,7 @@ results/h2/**/*.joblib
 offload_*/
 RESEARCH_LOG.md
 RESEARCH_LOG_V2.md
+RESEARCH_LOG_V3.md
 OLD_RESEARCH_LOG.md
 
 # LaTeX build artifacts
