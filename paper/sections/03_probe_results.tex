@@ -1,6 +1,6 @@
 \section{Correctness is linearly decodable before generation}
 \label{sec:probe_results}
-Before any token is generated, the hidden state at the last prompt token encodes information about whether the model's first-attempt generation will be correct. A linear probe trained on this single vector predicts pass/fail on held-out tasks with mean test area under the ROC curve (AUC) of $0.881 \pm 0.008$ over $50$ random splits, well above a prompt-length-only baseline of $0.657 \pm 0.014$. The full procedure is explained below.
+Before any token is generated, the hidden state at the last prompt token encodes information about whether the model's first-attempt generation will be correct. A linear probe trained on this single vector predicts pass/fail on held-out tasks with mean test area under the ROC curve (AUC) of $0.881 \pm 0.008$ over $50$ random splits, well above a prompt-length baseline of $0.657 \pm 0.014$. The full procedure is explained below.
 
 \subsection{Procedure}
 
@@ -20,10 +20,10 @@ To get a stable estimate rather than rely on a single split, the pipeline is fit
 \begin{enumerate}
     \item \textbf{Raw}: the three-step pipeline applied directly to the hidden state vector as captured.
     \item \textbf{Residualized}: for each of the 2560 hidden state dimensions, an OLS regression is fit on the train fold with that dimension as response and \texttt{prompt\_tokens}, the number of tokens in the prompt, as the single predictor. The fitted prediction is subtracted from both train and test for that dimension, and the standard three-step pipeline is applied to the residualized features. Residualization is therefore re-fit on every random split.
-    \item \textbf{Prompt-only baseline}: a logistic regression on \texttt{prompt\_tokens} alone (a single feature, so no dimensionality reduction as PCA is needed), fit and evaluated under the same 50 splits with $C$ selected by cross-validation as above.
+    \item \textbf{Prompt-length baseline}: a logistic regression on \texttt{prompt\_tokens} alone (a single feature, so no dimensionality reduction as PCA is needed), fit and evaluated under the same 50 splits with $C$ selected by cross-validation as above.
 \end{enumerate}
 
-The residualized configuration and the prompt-only baseline both target the same confound. Prompt length alone predicts the attempt-0 label above chance, as the baseline below shows, so a probe trained on raw hidden states could in principle exploit it by reading off prompt length rather than anything mechanistic about the model's internal representation. Residualizing each hidden state dimension against \texttt{prompt\_tokens} removes the linear contribution of prompt length from every dimension, leaving only the part of the hidden state that is not linearly explained by it. The prompt-only baseline goes one step further: it asks how well a probe can do using \texttt{prompt\_tokens} \emph{alone}, giving a reference the residualized probe must clear to show it carries signal beyond length.
+The residualized configuration and the prompt-length baseline both target the same confound. Prompt length alone predicts the attempt-0 label above chance, as the baseline below shows, so a probe trained on raw hidden states could in principle exploit it by reading off prompt length rather than anything mechanistic about the model's internal representation. Residualizing each hidden state dimension against \texttt{prompt\_tokens} removes the linear contribution of prompt length from every dimension, leaving only the part of the hidden state that is not linearly explained by it. The prompt-length baseline goes one step further: it asks how well a probe can do using \texttt{prompt\_tokens} \emph{alone}, giving a reference the residualized probe must clear to show it carries signal beyond length.
 
 The single sample per task ensures no task appears in both train and test splits, removing the inflation that would arise from leakage across attempts of the same problem.
 
@@ -64,7 +64,7 @@ Times selected (of 50) & $13$ & $16$ & $4$ & $3$ & $8$ & $2$ & $2$ & $2$ \\
 \FloatBarrier
 \subsection{Results}
 
-Each number in Table~\ref{tab:probe_results} is a leakage-free procedure-level estimate: for the raw and residualized probes, layer and $C$ are jointly selected inside each outer training fold and evaluated on the untouched outer-test fold; for the prompt-only baseline, only $C$ is selected as there is no layer. Reporting procedure-level numbers for all three configurations ensures they are directly comparable, since each reflects the performance of the full select-then-fit pipeline applied consistently, rather than locking any configuration to a specific hyperparameter value chosen by inspecting the test set.
+Each number in Table~\ref{tab:probe_results} is a leakage-free procedure-level estimate: for the raw and residualized probes, layer and $C$ are jointly selected inside each outer training fold and evaluated on the untouched outer-test fold; for the prompt-length baseline, only $C$ is selected as there is no layer. Reporting procedure-level numbers for all three configurations ensures they are directly comparable, since each reflects the performance of the full select-then-fit pipeline applied consistently, rather than locking any configuration to a specific hyperparameter value chosen by inspecting the test set.
 
 \begin{table}[h]
 \centering
@@ -74,22 +74,22 @@ Configuration & Test AUC (mean $\pm$ 95\% CI) \\
 \midrule
 Raw hidden states    & $0.881 \pm 0.008$ \\
 Residualized         & $0.842 \pm 0.010$ \\
-Prompt-only baseline & $0.657 \pm 0.014$ \\
+Prompt-length baseline & $0.657 \pm 0.014$ \\
 \bottomrule
 \end{tabular}
 \caption{Nested CV procedure-level performance for the three probe configurations, averaged over 50 outer stratified $80/20$ splits. Values are leakage-free outer-test AUCs.}
 \label{tab:probe_results}
 \end{table}
 
-The raw configuration reaches mean outer-test AUC $0.881$. After linearly removing prompt length from every hidden state dimension, the residualized configuration reaches $0.842$, a drop of only $0.039$ from raw. The prompt-only baseline reaches $0.657$. The gap between the residualized probe and the prompt-only baseline is about $19$ AUC points, placing a concrete floor under the result, a substantial portion of the hidden state's pass/fail signal is not explained by prompt length and survives its removal. The signal is present before a single output token is generated, encoded in the model's internal representation of the prompt alone.
+The raw configuration reaches mean outer-test AUC $0.881$. After linearly removing prompt length from every hidden state dimension, the residualized configuration reaches $0.842$, a drop of only $0.039$ from raw. The prompt-length baseline reaches $0.657$. The gap between the residualized probe and the baseline is about $19$ AUC points, placing a concrete floor under the result, a substantial portion of the hidden state's pass/fail signal is not explained by prompt length and survives its removal. The signal is present before a single output token is generated, encoded in the model's internal representation of the prompt alone.
 
-The prompt-only baseline reported above uses logistic regression. To check that this floor does not depend on the choice of a linear model, a random forest, a gradient boosting model, and a small multilayer perceptron were each fit on \texttt{prompt\_tokens} alone under the same nested CV procedure described in Section~\ref{subsec:layer_selection}. Table~\ref{tab:length_baselines} reports their mean outer-test AUC. None exceeds the logistic baseline. Even fit with nonlinear models, prompt length does not approach the residualized probe, so the probe's gap is not an artifact of the baseline being restricted to a linear model.
+The prompt-length baseline reported above uses logistic regression. To check that this floor does not depend on the choice of a linear model, a random forest, a gradient boosting model, and a small multilayer perceptron were each fit on \texttt{prompt\_tokens} alone under the same nested CV procedure described in Section~\ref{subsec:layer_selection}. Table~\ref{tab:length_baselines} reports their mean outer-test AUC. None exceeds the logistic baseline. Even fit with nonlinear models, prompt length does not approach the residualized probe, so the probe's gap is not an artifact of the baseline being restricted to a linear model.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lc}
 \toprule
-Prompt-only model & Test AUC (mean $\pm$ 95\% CI) \\
+Prompt-length model & Test AUC (mean $\pm$ 95\% CI) \\
 \midrule
 Logistic regression   & $0.657 \pm 0.014$ \\
 Random forest         & $0.642 \pm 0.013$ \\
@@ -97,7 +97,7 @@ Gradient boosting     & $0.649 \pm 0.015$ \\
 Multilayer perceptron & $0.657 \pm 0.014$ \\
 \bottomrule
 \end{tabular}
-\caption{Mean outer-test AUC for prompt-only models, each fit on \texttt{prompt\_tokens} alone following the nested CV procedure of Section~\ref{subsec:layer_selection}, with model-specific hyperparameter grids tuned in the inner folds. The nonlinear families do not improve on the logistic model.}
+\caption{Mean outer-test AUC for prompt-length models, each fit on \texttt{prompt\_tokens} alone following the nested CV procedure of Section~\ref{subsec:layer_selection}, with model-specific hyperparameter grids tuned in the inner folds. The nonlinear families do not improve on the logistic model.}
 \label{tab:length_baselines}
 \end{table}
 
